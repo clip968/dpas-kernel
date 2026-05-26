@@ -41,6 +41,7 @@
 #include "blk-stat.h"
 #include "blk-mq-sched.h"
 #include "blk-rq-qos.h"
+#include "blk-dpas.h"
 
 static DEFINE_PER_CPU(struct llist_head, blk_cpu_done);
 static DEFINE_PER_CPU(call_single_data_t, blk_cpu_csd);
@@ -4475,6 +4476,15 @@ struct request_queue *blk_mq_alloc_queue(struct blk_mq_tag_set *set,
 		blk_put_queue(q);
 		return ERR_PTR(ret);
 	}
+
+#ifdef CONFIG_DPAS
+	ret = blk_dpas_queue_init(q);
+	if (ret) {
+		blk_put_queue(q);
+		return ERR_PTR(ret);
+	}
+#endif
+
 	return q;
 }
 EXPORT_SYMBOL(blk_mq_alloc_queue);

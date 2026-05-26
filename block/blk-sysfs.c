@@ -10,6 +10,8 @@
 #include <linux/backing-dev.h>
 #include <linux/blktrace_api.h>
 #include <linux/debugfs.h>
+#include <linux/cpumask.h>
+#include "blk-dpas.h"
 
 #include "blk.h"
 #include "blk-mq.h"
@@ -378,6 +380,69 @@ static ssize_t queue_poll_show(struct gendisk *disk, char *page)
 			!!(disk->queue->limits.features & BLK_FEAT_POLL));
 }
 
+#ifdef CONFIG_DPAS
+static ssize_t queue_pas_enabled_show(struct gendisk *disk, char *page)
+{
+	struct dpas_queue *dpas = disk->queue->dpas;
+
+	if (!dpas)
+		return sysfs_emit(page, "0\n");
+	return sysfs_emit(page, "%u\n", READ_ONCE(dpas->pas_enabled));
+}
+
+static ssize_t queue_pas_enabled_store(struct gendisk *disk, const char *page, size_t count)
+{
+	struct request_queue *q = disk->queue;
+	struct dpas_queue *dpas = q->dpas;
+	bool enabled;
+	int ret;
+
+	if (!dpas)
+		return -EOPNOTSUPP;
+
+	ret = kstrtobool(page, &enabled);
+	if (ret)
+		return ret;
+
+	/* PAS는 polling 가능한 blk-mq queue에서만 의미가 있다. */
+	if (enabled && (!queue_is_mq(q) || !blk_mq_can_poll(q)))
+		return -EOPNOTSUPP;
+
+	/* 첫 단계에서는 enable flag만 바꾸고, sleep 동작은 아직 넣지 않는다. */
+	WRITE_ONCE(dpas->pas_enabled, enabled);
+	return count;
+}
+static ssize_t queue_pas_stats_show(struct gendisk *disk, char *page)
+{
+	struct dpas_queue *dpas = disk->queue->dpas;
+	ssize_t len = 0;
+	int cpu;
+
+	if (!dpas)
+		return sysfs_emit(page, "disabled\n");
+
+	len += sysfs_emit_at(page, len, "enabled=%u min_duration_ns=%llu max_duration_ns=%llu\n",
+			READ_ONCE(dpas->pas_enabled),
+			(unsigned long long)READ_ONCE(dpas->min_duration_ns),
+			(unsigned long long)READ_ONCE(dpas->max_duration_ns));
+
+	for_each_possible_cpu(cpu) {
+		struct dpas_cpu_state *state = per_cpu_ptr(dpas->cpu_state, cpu);
+
+		/* skeleton 단계에서는 poll 진입 횟수와 skip 횟수만 먼저 보여준다. */
+		len += sysfs_emit_at(page, len, "cpu=%d poll_entry=%llu skip=%llu\n",
+				cpu,
+				(unsigned long long)READ_ONCE(state->poll_entry_count),
+				(unsigned long long)READ_ONCE(state->skip_count));
+
+		if (len >= PAGE_SIZE - 80)
+			break;
+	}
+
+	return len;
+}
+#endif
+
 static ssize_t queue_zoned_show(struct gendisk *disk, char *page)
 {
 	if (blk_queue_is_zoned(disk->queue))
@@ -656,6 +721,10 @@ QUEUE_RW_ENTRY(queue_nomerges, "nomerges");
 QUEUE_LIM_RW_ENTRY(queue_iostats_passthrough, "iostats_passthrough");
 QUEUE_RW_ENTRY(queue_rq_affinity, "rq_affinity");
 QUEUE_RW_ENTRY(queue_poll, "io_poll");
+#ifdef CONFIG_DPAS
+QUEUE_RW_ENTRY(queue_pas_enabled, "pas_enabled");
+QUEUE_RO_ENTRY(queue_pas_stats, "pas_stats");
+#endif
 QUEUE_RW_ENTRY(queue_poll_delay, "io_poll_delay");
 QUEUE_LIM_RW_ENTRY(queue_wc, "write_cache");
 QUEUE_LIM_RO_ENTRY(queue_fua, "fua");
@@ -785,6 +854,10 @@ static const struct attribute *const queue_attrs[] = {
 	&queue_nomerges_entry.attr,
 	&queue_poll_entry.attr,
 	&queue_poll_delay_entry.attr,
+#ifdef CONFIG_DPAS
+	&queue_pas_enabled_entry.attr,
+	&queue_pas_stats_entry.attr,
+#endif
 	&queue_zoned_qd1_writes_entry.attr,
 
 	NULL,

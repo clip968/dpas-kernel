@@ -481,12 +481,21 @@ struct blk_independent_access_ranges {
 	struct blk_independent_access_range	ia_range[];
 };
 
+#ifdef CONFIG_DPAS
+struct dpas_queue;
+#endif
+
 struct request_queue {
 	/*
 	 * The queue owner gets to use this for whatever they like.
 	 * ll_rw_blk doesn't touch it.
 	 */
 	void			*queuedata;
+
+#ifdef CONFIG_DPAS
+	/* PAS 상태는 request_queue에 직접 흩뿌리지 않고 q->dpas 아래에 둔다. */
+	struct dpas_queue	*dpas;
+#endif
 
 	struct elevator_queue	*elevator;
 
