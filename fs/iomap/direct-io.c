@@ -42,6 +42,7 @@ struct iomap_dio {
 		struct {
 			struct iov_iter		*iter;
 			struct task_struct	*waiter;
+			struct bio			*poll_bio;
 		} submit;
 
 		/* used for aio completion: */
@@ -67,10 +68,12 @@ static void iomap_dio_submit_bio(const struct iomap_iter *iter,
 
 	atomic_inc(&dio->ref);
 
-	/* Sync dio can't be polled reliably */
-	if ((iocb->ki_flags & IOCB_HIPRI) && !is_sync_kiocb(iocb)) {
+	// 실제 bio를 polled로 설정
+	// dio->submit.poll_bio를 통해 polled bio를 추적
+	// polled bio는 IOCB_HIPRI가 설정된 경우에만 설정됨
+	if (iocb->ki_flags & IOCB_HIPRI) {
 		bio_set_polled(bio, iocb);
-		WRITE_ONCE(iocb->private, bio);
+		dio->submit.poll_bio = bio;
 	}
 
 	if (dio->dops && dio->dops->submit_io) {
@@ -716,6 +719,7 @@ __iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 
 	dio->submit.iter = iter;
 	dio->submit.waiter = current;
+	dio->submit.poll_bio = NULL;
 
 	if (iocb->ki_flags & IOCB_NOWAIT)
 		iomi.flags |= IOMAP_NOWAIT;
@@ -849,6 +853,8 @@ __iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 	else if (dio->flags & IOMAP_DIO_NEED_SYNC)
 		dio->flags |= IOMAP_DIO_COMP_WORK;
 
+	WRITE_ONCE(iocb->private, dio->submit.poll_bio);
+
 	/*
 	 * We are about to drop our additional submission reference, which
 	 * might be the last reference to the dio.  There are three different
@@ -876,7 +882,11 @@ __iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 			if (!READ_ONCE(dio->submit.waiter))
 				break;
 
-			blk_io_schedule();
+			if (dio->submit.poll_bio &&
+				(dio->submit.poll_bio->bi_opf & REQ_POLLED))
+				bio_poll(dio->submit.poll_bio, NULL, 0);
+			else
+				blk_io_schedule();
 		}
 		__set_current_state(TASK_RUNNING);
 	}

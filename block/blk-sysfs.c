@@ -554,6 +554,223 @@ static ssize_t queue_io_timeout_store(struct gendisk *disk, const char *page,
 	return count;
 }
 
+static bool queue_dpas_poll_capable(struct request_queue *q)
+{
+	return q->mq_ops && q->mq_ops->poll;
+}
+
+static ssize_t queue_dpas_store_int(struct request_queue *q, const char *page,
+		size_t count, int *field, int min, int max)
+{
+	int err, val;
+
+	if (!queue_dpas_poll_capable(q))
+		return -EINVAL;
+
+	err = kstrtoint(page, 10, &val);
+	if (err < 0)
+		return err;
+	if (val < min || val > max)
+		return -EINVAL;
+
+	*field = val;
+	return count;
+}
+
+static ssize_t queue_dpas_store_u32(struct request_queue *q, const char *page,
+		size_t count, u32 *field, u32 min, u32 max)
+{
+	int err;
+	u32 val;
+
+	if (!queue_dpas_poll_capable(q))
+		return -EINVAL;
+
+	err = kstrtou32(page, 10, &val);
+	if (err < 0)
+		return err;
+	if (val < min || val > max)
+		return -EINVAL;
+
+	*field = val;
+	return count;
+}
+
+static ssize_t queue_dpas_store_ll(struct request_queue *q, const char *page,
+		size_t count, long long *field, int min, int max)
+{
+	int err, val;
+
+	if (!queue_dpas_poll_capable(q))
+		return -EINVAL;
+
+	err = kstrtoint(page, 10, &val);
+	if (err < 0)
+		return err;
+	if (val < min || val > max)
+		return -EINVAL;
+
+	*field = val;
+	return count;
+}
+
+static void queue_dpas_init_pas_stat(struct blk_rq_pas_stat *stat, u32 dur,
+		long long adj, long long up, long long dn)
+{
+	stat->dur = dur;
+	stat->adj = adj;
+	stat->up = up;
+	stat->dn = dn;
+	stat->sr_pnlt = 0;
+	stat->sr_last = 1;
+	stat->update_req = 0;
+	stat->dur_cnt = 1;
+	stat->dur_cnt_checked = 0;
+}
+
+static void queue_dpas_reinit_pas_stats(struct request_queue *q,
+		long long adj)
+{
+	struct blk_rq_pas_stat *stat;
+	int bucket_idx;
+	int cpu;
+
+	for_each_possible_cpu(cpu) {
+		stat = per_cpu_ptr(q->pas_stat, cpu);
+		for (bucket_idx = 0; bucket_idx < BLK_MQ_POLL_STATS_BKTS;
+				bucket_idx++)
+			queue_dpas_init_pas_stat(&stat[bucket_idx],
+					q->d_init, adj, q->up_init,
+					q->dn_init);
+	}
+}
+
+#define QUEUE_DPAS_INT_RW(_prefix, _field, _min, _max)		\
+static ssize_t _prefix##_show(struct gendisk *disk, char *page)	\
+{									\
+	return sysfs_emit(page, "%d\n", disk->queue->_field);	\
+}									\
+static ssize_t _prefix##_store(struct gendisk *disk, const char *page, \
+		size_t count)						\
+{									\
+	struct request_queue *q = disk->queue;			\
+									\
+	return queue_dpas_store_int(q, page, count, &q->_field,	\
+			_min, _max);					\
+}
+
+#define QUEUE_DPAS_U32_RW(_prefix, _field, _min, _max)		\
+static ssize_t _prefix##_show(struct gendisk *disk, char *page)	\
+{									\
+	return sysfs_emit(page, "%u\n", disk->queue->_field);	\
+}									\
+static ssize_t _prefix##_store(struct gendisk *disk, const char *page, \
+		size_t count)						\
+{									\
+	struct request_queue *q = disk->queue;			\
+									\
+	return queue_dpas_store_u32(q, page, count, &q->_field, \
+			_min, _max);					\
+}
+
+#define QUEUE_DPAS_LL_RW(_prefix, _field, _min, _max)		\
+static ssize_t _prefix##_show(struct gendisk *disk, char *page)	\
+{									\
+	return sysfs_emit(page, "%lld\n", disk->queue->_field);	\
+}									\
+static ssize_t _prefix##_store(struct gendisk *disk, const char *page, \
+		size_t count)						\
+{									\
+	struct request_queue *q = disk->queue;			\
+									\
+	return queue_dpas_store_ll(q, page, count, &q->_field,	\
+			_min, _max);					\
+}
+
+static ssize_t queue_d_init_show(struct gendisk *disk, char *page)
+{
+	return sysfs_emit(page, "%u\n", disk->queue->d_init);
+}
+
+static ssize_t queue_d_init_store(struct gendisk *disk, const char *page,
+		size_t count)
+{
+	struct request_queue *q = disk->queue;
+	ssize_t ret;
+
+	if (!q->pas_stat)
+		return -EINVAL;
+
+	ret = queue_dpas_store_u32(q, page, count, &q->d_init, 100, 99000);
+	if (ret < 0)
+		return ret;
+
+	queue_dpas_reinit_pas_stats(q, q->div);
+	return ret;
+}
+
+static ssize_t queue_up_init_show(struct gendisk *disk, char *page)
+{
+	return sysfs_emit(page, "%lld\n", disk->queue->up_init);
+}
+
+static ssize_t queue_up_init_store(struct gendisk *disk, const char *page,
+		size_t count)
+{
+	struct request_queue *q = disk->queue;
+	ssize_t ret;
+
+	if (!q->pas_stat)
+		return -EINVAL;
+
+	ret = queue_dpas_store_ll(q, page, count, &q->up_init, 100, 99000);
+	if (ret < 0)
+		return ret;
+
+	queue_dpas_reinit_pas_stats(q, q->div + q->up_init);
+	return ret;
+}
+
+static ssize_t queue_dn_init_show(struct gendisk *disk, char *page)
+{
+	return sysfs_emit(page, "%lld\n", disk->queue->dn_init);
+}
+
+static ssize_t queue_dn_init_store(struct gendisk *disk, const char *page,
+		size_t count)
+{
+	struct request_queue *q = disk->queue;
+	ssize_t ret;
+
+	if (!q->pas_stat)
+		return -EINVAL;
+
+	ret = queue_dpas_store_ll(q, page, count, &q->dn_init, 10000, 990000);
+	if (ret < 0)
+		return ret;
+
+	queue_dpas_reinit_pas_stats(q, q->div + q->up_init);
+	return ret;
+}
+
+QUEUE_DPAS_INT_RW(queue_pas_enabled, pas_enabled, 0, 1)
+QUEUE_DPAS_INT_RW(queue_pas_adaptive_enabled, pas_adaptive_enabled, 0, 2)
+QUEUE_DPAS_INT_RW(queue_ehp_enabled, ehp_enabled, 0, 1)
+QUEUE_DPAS_INT_RW(queue_max_no_lock, max_no_lock, 1, INT_MAX)
+QUEUE_DPAS_INT_RW(queue_poll_threshold, poll_threshold, 0, INT_MAX)
+QUEUE_DPAS_INT_RW(queue_logging_enabled, logging_enabled, 0, 2)
+QUEUE_DPAS_LL_RW(queue_heat_up, heat_up, 0, INT_MAX)
+QUEUE_DPAS_LL_RW(queue_cool_dn, cool_dn, 0, 999999)
+QUEUE_DPAS_LL_RW(queue_min_dn, min_dn, 10000, 990000)
+QUEUE_DPAS_LL_RW(queue_max_dn, max_dn, 10000, 990000)
+QUEUE_DPAS_INT_RW(queue_switch_param1, switch_param1, -1, INT_MAX)
+QUEUE_DPAS_INT_RW(queue_switch_param2, switch_param2, -1, INT_MAX)
+QUEUE_DPAS_INT_RW(queue_switch_param3, switch_param3, -1, INT_MAX)
+QUEUE_DPAS_INT_RW(queue_switch_param4, switch_param4, -1, INT_MAX)
+QUEUE_DPAS_INT_RW(queue_switch_param5, switch_param5, -1, INT_MAX)
+QUEUE_DPAS_INT_RW(queue_switch_param6, switch_param6, -1, INT_MAX)
+QUEUE_DPAS_INT_RW(queue_switch_param7, switch_param7, -1, INT_MAX)
+
 static ssize_t queue_wc_show(struct gendisk *disk, char *page)
 {
 	if (blk_queue_write_cache(disk->queue))
@@ -658,6 +875,26 @@ QUEUE_LIM_RW_ENTRY(queue_iostats_passthrough, "iostats_passthrough");
 QUEUE_RW_ENTRY(queue_rq_affinity, "rq_affinity");
 QUEUE_RW_ENTRY(queue_poll, "io_poll");
 QUEUE_RW_ENTRY(queue_poll_delay, "io_poll_delay");
+QUEUE_RW_ENTRY(queue_pas_enabled, "pas_enabled");
+QUEUE_RW_ENTRY(queue_pas_adaptive_enabled, "pas_adaptive_enabled");
+QUEUE_RW_ENTRY(queue_ehp_enabled, "ehp_enabled");
+QUEUE_RW_ENTRY(queue_max_no_lock, "pas_max_no_lock");
+QUEUE_RW_ENTRY(queue_poll_threshold, "pas_poll_threshold");
+QUEUE_RW_ENTRY(queue_logging_enabled, "logging_enabled");
+QUEUE_RW_ENTRY(queue_d_init, "pas_d_init");
+QUEUE_RW_ENTRY(queue_up_init, "pas_up_init");
+QUEUE_RW_ENTRY(queue_dn_init, "pas_dn_init");
+QUEUE_RW_ENTRY(queue_heat_up, "pas_heat_up");
+QUEUE_RW_ENTRY(queue_cool_dn, "pas_cool_dn");
+QUEUE_RW_ENTRY(queue_min_dn, "pas_min_dn");
+QUEUE_RW_ENTRY(queue_max_dn, "pas_max_dn");
+QUEUE_RW_ENTRY(queue_switch_param1, "switch_param1");
+QUEUE_RW_ENTRY(queue_switch_param2, "switch_param2");
+QUEUE_RW_ENTRY(queue_switch_param3, "switch_param3");
+QUEUE_RW_ENTRY(queue_switch_param4, "switch_param4");
+QUEUE_RW_ENTRY(queue_switch_param5, "switch_param5");
+QUEUE_RW_ENTRY(queue_switch_param6, "switch_param6");
+QUEUE_RW_ENTRY(queue_switch_param7, "switch_param7");
 QUEUE_LIM_RW_ENTRY(queue_wc, "write_cache");
 QUEUE_LIM_RO_ENTRY(queue_fua, "fua");
 QUEUE_LIM_RO_ENTRY(queue_dax, "dax");
@@ -808,6 +1045,26 @@ static const struct attribute *const blk_mq_queue_attrs[] = {
 	 */
 	&queue_rq_affinity_entry.attr,
 	&queue_io_timeout_entry.attr,
+	&queue_pas_enabled_entry.attr,
+	&queue_pas_adaptive_enabled_entry.attr,
+	&queue_ehp_enabled_entry.attr,
+	&queue_max_no_lock_entry.attr,
+	&queue_poll_threshold_entry.attr,
+	&queue_logging_enabled_entry.attr,
+	&queue_d_init_entry.attr,
+	&queue_up_init_entry.attr,
+	&queue_dn_init_entry.attr,
+	&queue_heat_up_entry.attr,
+	&queue_cool_dn_entry.attr,
+	&queue_min_dn_entry.attr,
+	&queue_max_dn_entry.attr,
+	&queue_switch_param1_entry.attr,
+	&queue_switch_param2_entry.attr,
+	&queue_switch_param3_entry.attr,
+	&queue_switch_param4_entry.attr,
+	&queue_switch_param5_entry.attr,
+	&queue_switch_param6_entry.attr,
+	&queue_switch_param7_entry.attr,
 
 	NULL,
 };
