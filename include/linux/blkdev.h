@@ -49,6 +49,12 @@ extern const struct device_type disk_type;
 extern const struct device_type part_type;
 extern const struct class block_class;
 
+/* Must be consistent with DPAS/PAS bucket indexing. */
+#define BLK_MQ_POLL_STATS_BKTS 16
+
+/* Doing classic polling */
+#define BLK_MQ_POLL_CLASSIC -1
+
 /*
  * Maximum number of blkcg policies allowed to be registered concurrently.
  * Defined here to simplify include dependency.
@@ -481,21 +487,12 @@ struct blk_independent_access_ranges {
 	struct blk_independent_access_range	ia_range[];
 };
 
-#ifdef CONFIG_DPAS
-struct dpas_queue;
-#endif
-
 struct request_queue {
 	/*
 	 * The queue owner gets to use this for whatever they like.
 	 * ll_rw_blk doesn't touch it.
 	 */
 	void			*queuedata;
-
-#ifdef CONFIG_DPAS
-	/* PAS 상태는 request_queue에 직접 흩뿌리지 않고 q->dpas 아래에 둔다. */
-	struct dpas_queue	*dpas;
-#endif
 
 	struct elevator_queue	*elevator;
 
@@ -510,6 +507,43 @@ struct request_queue {
 	unsigned long		queue_flags;
 
 	unsigned int __data_racy rq_timeout;
+	int			poll_nsec;
+
+	struct blk_stat_callback	*poll_cb;
+	struct blk_rq_stat	*poll_stat;
+
+	struct blk_rq_pas_stat __percpu *pas_stat;
+	int			last_poll_count;
+
+	int pas_enabled;
+	int pas_adaptive_enabled;
+	int ehp_enabled;
+	int max_no_lock;
+	int poll_threshold;
+	int logging_enabled;
+	int switch_enabled;
+	int switch_param1;
+	int switch_param2;
+	int switch_param3;
+	int switch_param4;
+	int switch_param5;
+	int switch_param6;
+	int switch_param7;
+	u64 div;
+	u32 d_init; /* unit: us, int -> u32? */
+	long long up_init;
+	long long dn_init;
+
+	long long heat_up; /* for DPAS and DPAS2 */
+	long long cool_dn; /* for DPAS and DPAS2 */
+	long long min_dn; /* for DPAS */
+	long long max_dn; /* for DPAS */
+	int updn_ratio; /* for DPAS */
+
+	unsigned long long cnt_rel_hybrid_poll;
+	unsigned long long cnt_rel_fops;
+	unsigned long long cnt_rel_comp_before_sleep;
+	unsigned long long cnt_lock_d_c_separate;
 
 	unsigned int		queue_depth;
 

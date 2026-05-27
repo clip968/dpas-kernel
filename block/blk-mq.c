@@ -41,7 +41,6 @@
 #include "blk-stat.h"
 #include "blk-mq-sched.h"
 #include "blk-rq-qos.h"
-#include "blk-dpas.h"
 
 static DEFINE_PER_CPU(struct llist_head, blk_cpu_done);
 static DEFINE_PER_CPU(call_single_data_t, blk_cpu_csd);
@@ -54,6 +53,20 @@ static void blk_mq_try_issue_list_directly(struct blk_mq_hw_ctx *hctx,
 		struct list_head *list);
 static int blk_hctx_poll(struct request_queue *q, struct blk_mq_hw_ctx *hctx,
 			 struct io_comp_batch *iob, unsigned int flags);
+
+static void init_pas_stat(struct blk_rq_pas_stat *stat,
+		u32 dur, long long adj, long long up, long long dn)
+{
+	stat->dur = dur;
+	stat->adj = adj;
+	stat->up = up;
+	stat->dn = dn;
+	stat->sr_pnlt = 0;
+	stat->sr_last = 1;
+	stat->dur_cnt = 1;
+	stat->dur_cnt_checked = 0;
+	stat->update_req = 0;
+}
 
 /*
  * Check if any of the ctx, dispatch list or elevator
@@ -4446,6 +4459,10 @@ void blk_mq_release(struct request_queue *q)
 	}
 
 	kfree(q->queue_hw_ctx);
+	if (q->pas_stat) {
+		free_percpu(q->pas_stat);
+		q->pas_stat = NULL;
+	}
 
 	/*
 	 * release .mq_kobj and sw queue's kobject now because
@@ -4476,14 +4493,6 @@ struct request_queue *blk_mq_alloc_queue(struct blk_mq_tag_set *set,
 		blk_put_queue(q);
 		return ERR_PTR(ret);
 	}
-
-#ifdef CONFIG_DPAS
-	ret = blk_dpas_queue_init(q);
-	if (ret) {
-		blk_put_queue(q);
-		return ERR_PTR(ret);
-	}
-#endif
 
 	return q;
 }
@@ -4680,6 +4689,10 @@ static void blk_mq_realloc_hw_ctxs(struct blk_mq_tag_set *set,
 int blk_mq_init_allocated_queue(struct blk_mq_tag_set *set,
 		struct request_queue *q)
 {
+	struct blk_rq_pas_stat *stat;
+	int bucket_idx;
+	int cpu;
+
 	/* mark the queue as mq asap */
 	q->mq_ops = set->ops;
 
@@ -4714,6 +4727,41 @@ int blk_mq_init_allocated_queue(struct blk_mq_tag_set *set,
 
 	q->nr_requests = set->queue_depth;
 	q->async_depth = set->queue_depth;
+
+	q->poll_nsec = BLK_MQ_POLL_CLASSIC;
+
+	q->max_no_lock = 100;
+	q->poll_threshold = 0;
+	q->div = 1000000;
+	q->d_init = 100;
+	q->up_init = 10000;
+	q->dn_init = 100000;
+	q->heat_up = 50000;
+	q->cool_dn = 100000;
+	q->min_dn = 10000;
+	q->max_dn = 100000;
+	q->updn_ratio = 10;
+
+	q->switch_param1 = 0;
+	q->switch_param2 = 10;
+	q->switch_param3 = 10;
+	q->switch_param4 = 1;
+	q->switch_param5 = 100;
+	q->switch_param6 = 1000;
+	q->switch_param7 = 10000;
+
+	q->pas_stat = __alloc_percpu(BLK_MQ_POLL_STATS_BKTS *
+			sizeof(struct blk_rq_pas_stat),
+			__alignof__(struct blk_rq_pas_stat));
+	if (!q->pas_stat)
+		goto err_hctxs;
+
+	for_each_possible_cpu(cpu) {
+		stat = per_cpu_ptr(q->pas_stat, cpu);
+		for (bucket_idx = 0; bucket_idx < BLK_MQ_POLL_STATS_BKTS;
+				bucket_idx++)
+			init_pas_stat(&stat[bucket_idx], q->d_init, q->div, q->up_init, q->dn_init);
+	}
 
 	blk_mq_init_cpu_queues(q, set->nr_hw_queues);
 	blk_mq_map_swqueue(q);

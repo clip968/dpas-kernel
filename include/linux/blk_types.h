@@ -518,4 +518,17 @@ struct blk_rq_stat {
 	u64 batch;
 };
 
+struct blk_rq_pas_stat {
+	u64 dur;
+	long long adj;
+	long long up;
+	long long dn;
+
+	u8 sr_pnlt;
+	u8 sr_last;
+	u8 update_req;
+	u8 dur_cnt;
+	u8 dur_cnt_checked;
+};
+
 #endif /* __LINUX_BLK_TYPES_H */

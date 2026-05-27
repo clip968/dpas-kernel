@@ -26,16 +26,6 @@ menuconfig BLOCK
 
 if BLOCK
 
-config DPAS
-	bool "DPAS/PAS experimental block polling support"
-	depends on BLOCK
-	default n
-	help
-	  Enable experimental DPAS/PAS support for block polling.
-
-	  This option adds a small PAS-specific state layer and guarded
-	  polling hooks. When disabled, the new DPAS/PAS code is not built.
-
 config BLOCK_LEGACY_AUTOLOAD
 	bool "Legacy autoloading support"
 	default y

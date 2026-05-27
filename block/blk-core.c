@@ -50,7 +50,6 @@
 #include "blk-cgroup.h"
 #include "blk-throttle.h"
 #include "blk-ioprio.h"
-#include "blk-dpas.h"
 
 struct dentry *blk_debugfs_root;
 
@@ -257,12 +256,6 @@ static void blk_free_queue_rcu(struct rcu_head *rcu_head)
 
 static void blk_free_queue(struct request_queue *q)
 {
-
-#ifdef CONFIG_DPAS
-	/* request_queue가 사라지기 전에 q->dpas와 percpu state를 정리한다. */
-	blk_dpas_queue_exit(q);
-#endif
-
 	blk_free_queue_stats(q->stats);
 	if (queue_is_mq(q))
 		blk_mq_release(q);
@@ -975,13 +968,6 @@ int bio_poll(struct bio *bio, struct io_comp_batch *iob, unsigned int flags)
 	if (!percpu_ref_tryget(&q->q_usage_counter))
 		return 0;
 	if (queue_is_mq(q)) {
-#ifdef CONFIG_DPAS
-		/*
-		 * 첫 hook은 sleep 없이 counter만 증가시킨다.
-		 * ret 값과 기존 poll 동작은 그대로 둔다.
-		 */
-		blk_dpas_poll_count(q);
-#endif
 		ret = blk_mq_poll(q, cookie, iob, flags);
 	} else {
 		struct gendisk *disk = q->disk;
