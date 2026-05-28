@@ -5348,6 +5348,33 @@ int blk_mq_poll(struct request_queue *q, blk_qc_t cookie,
 	return blk_hctx_poll(q, q->queue_hw_ctx[cookie], iob, flags);
 }
 
+static void blk_mq_poll_pas_prepare(struct request_queue *q, struct bio *bio,
+	unsigned int flags)
+{
+	if(!q->pas_enabled)
+		return;
+
+	if(!bio)
+		return;
+	/* 1차 checkpoint : no sleep, counter only */
+	q->last_poll_count++;
+}
+
+int blk_mq_poll_bio(struct request_queue *q, struct bio *bio, blk_qc_t cookie,
+		struct io_comp_batch *iob, unsigned int flags)
+{
+	struct blk_mq_hw_ctx *hctx;
+
+	if (!blk_mq_can_poll(q))
+		return 0;
+
+	hctx = q->queue_hw_ctx[cookie];
+
+	blk_mq_poll_pas_prepare(q, bio, flags);
+
+	return blk_hctx_poll(q, hctx, iob, flags);
+}
+
 int blk_rq_poll(struct request *rq, struct io_comp_batch *iob,
 		unsigned int poll_flags)
 {

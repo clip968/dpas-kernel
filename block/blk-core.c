@@ -635,7 +635,7 @@ static void __submit_bio(struct bio *bio)
 		blk_mq_submit_bio(bio);
 	} else if (likely(bio_queue_enter(bio) == 0)) {
 		struct gendisk *disk = bio->bi_bdev->bd_disk;
-	
+
 		if ((bio->bi_opf & REQ_POLLED) &&
 		    !(disk->queue->limits.features & BLK_FEAT_POLL)) {
 			bio->bi_status = BLK_STS_NOTSUPP;
@@ -968,7 +968,7 @@ int bio_poll(struct bio *bio, struct io_comp_batch *iob, unsigned int flags)
 	if (!percpu_ref_tryget(&q->q_usage_counter))
 		return 0;
 	if (queue_is_mq(q)) {
-		ret = blk_mq_poll(q, cookie, iob, flags);
+		ret = blk_mq_poll_bio(q, bio, cookie, iob, flags);
 	} else {
 		struct gendisk *disk = q->disk;
 
