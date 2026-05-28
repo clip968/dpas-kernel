@@ -68,9 +68,10 @@ static void iomap_dio_submit_bio(const struct iomap_iter *iter,
 
 	atomic_inc(&dio->ref);
 
-	// 실제 bio를 polled로 설정
-	// dio->submit.poll_bio를 통해 polled bio를 추적
-	// polled bio는 IOCB_HIPRI가 설정된 경우에만 설정됨
+	/*
+	 * Track the polled bio for sync waiting and later iopoll
+	 * exposure through iocb->private.
+	 */
 	if (iocb->ki_flags & IOCB_HIPRI) {
 		bio_set_polled(bio, iocb);
 		dio->submit.poll_bio = bio;
