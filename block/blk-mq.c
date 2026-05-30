@@ -11,6 +11,7 @@
 #include <linux/bio.h>
 #include <linux/blkdev.h>
 #include <linux/blk-integrity.h>
+#include <linux/hrtimer.h>
 #include <linux/kmemleak.h>
 #include <linux/mm.h>
 #include <linux/init.h>
@@ -5348,15 +5349,53 @@ int blk_mq_poll(struct request_queue *q, blk_qc_t cookie,
 	return blk_hctx_poll(q, q->queue_hw_ctx[cookie], iob, flags);
 }
 
+static void blk_mq_poll_lhp_sleep(struct request_queue *q, struct bio *bio,
+				  unsigned int flags)
+{
+	struct hrtimer_sleeper hs;
+	ktime_t kt;
+
+	if (flags & BLK_POLL_ONESHOT)
+		return;
+
+	if (q->poll_nsec <= 0)
+		return;
+
+	if (!bio)
+		return;
+
+	if (bio_flagged(bio, BIO_LHP_POLL_SLEPT))
+		return;
+
+	bio_set_flag(bio, BIO_LHP_POLL_SLEPT);
+
+	kt = ktime_set(0, q->poll_nsec);
+
+	hrtimer_setup_sleeper_on_stack(&hs, CLOCK_MONOTONIC,
+				       HRTIMER_MODE_REL);
+
+	hrtimer_set_expires(&hs.timer, kt);
+	set_current_state(TASK_UNINTERRUPTIBLE);
+	hrtimer_sleeper_start_expires(&hs, HRTIMER_MODE_REL);
+
+	if (hs.task)
+		io_schedule();
+
+	hrtimer_cancel(&hs.timer);
+	__set_current_state(TASK_RUNNING);
+	destroy_hrtimer_on_stack(&hs.timer);
+}
+
 static void blk_mq_poll_pas_prepare(struct request_queue *q, struct bio *bio,
 	unsigned int flags)
 {
-	if(!q->pas_enabled)
+	if (!q->pas_enabled)
 		return;
 
-	if(!bio)
+	if (!bio)
 		return;
-	/* 1차 checkpoint : no sleep, counter only */
+
+	/* First checkpoint: no sleep, counter only. */
 	q->last_poll_count++;
 }
 
@@ -5370,6 +5409,7 @@ int blk_mq_poll_bio(struct request_queue *q, struct bio *bio, blk_qc_t cookie,
 
 	hctx = q->queue_hw_ctx[cookie];
 
+	blk_mq_poll_lhp_sleep(q, bio, flags);
 	blk_mq_poll_pas_prepare(q, bio, flags);
 
 	return blk_hctx_poll(q, hctx, iob, flags);

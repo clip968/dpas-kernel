@@ -271,7 +271,6 @@ static ssize_t queue_##_name##_show(struct gendisk *disk, char *page)	\
 /* deprecated fields */
 QUEUE_SYSFS_SHOW_CONST(discard_zeroes_data, 0)
 QUEUE_SYSFS_SHOW_CONST(write_same_max, 0)
-QUEUE_SYSFS_SHOW_CONST(poll_delay, -1)
 
 static int queue_max_discard_sectors_store(struct gendisk *disk,
 		const char *page, size_t count, struct queue_limits *lim)
@@ -509,9 +508,39 @@ queue_rq_affinity_store(struct gendisk *disk, const char *page, size_t count)
 	return ret;
 }
 
+static ssize_t queue_poll_delay_show(struct gendisk *disk, char *page)
+{
+	struct request_queue *q = disk->queue;
+	int val;
+
+	if (q->poll_nsec == BLK_MQ_POLL_CLASSIC)
+		val = BLK_MQ_POLL_CLASSIC;
+	else
+		val = q->poll_nsec / 1000;
+
+	return sysfs_emit(page, "%d\n", val);
+}
+
 static ssize_t queue_poll_delay_store(struct gendisk *disk, const char *page,
 				size_t count)
 {
+	struct request_queue *q = disk->queue;
+	int err, val;
+
+	if (!q->mq_ops || !q->mq_ops->poll)
+		return -EINVAL;
+
+	err = kstrtoint(page, 10, &val);
+	if (err < 0)
+		return err;
+
+	if (val == BLK_MQ_POLL_CLASSIC)
+		q->poll_nsec = BLK_MQ_POLL_CLASSIC;
+	else if (val > 0)
+		q->poll_nsec = val * 1000;
+	else
+		return -EINVAL;
+
 	return count;
 }
 
