@@ -6,6 +6,7 @@
  * Copyright (C) 2013-2014 Christoph Hellwig
  */
 #include <linux/kernel.h>
+#include <linux/math64.h>
 #include <linux/module.h>
 #include <linux/backing-dev.h>
 #include <linux/bio.h>
@@ -58,16 +59,40 @@ static int blk_hctx_poll(struct request_queue *q, struct blk_mq_hw_ctx *hctx,
 static void init_pas_stat(struct blk_rq_pas_stat *stat,
 		u32 dur, long long adj, long long up, long long dn)
 {
+	/*
+	 * PAS bucket의 기본 sleep 상태.
+	 * dur은 다음 poll 전에 요청할 sleep duration이고, adj/up/dn은
+	 * UNDER/OVER 결과에 따라 dur을 조정하는 fixed-point 계수다.
+	 */
 	stat->dur = dur;
 	stat->adj = adj;
 	stat->up = up;
 	stat->dn = dn;
+
+	/*
+	 * 최근 두 번의 sleep 결과. 5.18 DPAS 관례를 따라 0은 oversleep,
+	 * 1은 undersleep으로 보고 다음 duration update의 입력으로 쓴다.
+	 */
 	stat->sr_pnlt = 0;
 	stat->sr_last = 1;
+
+	/*
+	 * dur_cnt는 bucket duration의 세대 번호다. dur_cnt_checked와
+	 * update_req는 같은 duration 세대에 대해 결과를 중복 반영하지
+	 * 않도록 막는 최소 guard 역할을 한다.
+	 */
 	stat->dur_cnt = 1;
 	stat->dur_cnt_checked = 0;
 	stat->update_req = 0;
 }
+
+struct blk_mq_pas_poll_ctx {
+	bool active;
+	int cpu;
+	int bucket;
+	u8 dur_cnt;
+	u64 dur;
+};
 
 /*
  * Check if any of the ctx, dispatch list or elevator
@@ -5322,23 +5347,40 @@ void blk_mq_update_nr_hw_queues(struct blk_mq_tag_set *set, int nr_hw_queues)
 }
 EXPORT_SYMBOL_GPL(blk_mq_update_nr_hw_queues);
 
-static int blk_hctx_poll(struct request_queue *q, struct blk_mq_hw_ctx *hctx,
-			 struct io_comp_batch *iob, unsigned int flags)
+static int __blk_hctx_poll(struct request_queue *q, struct blk_mq_hw_ctx *hctx,
+			   struct io_comp_batch *iob, unsigned int flags,
+			   unsigned int *poll_countp)
 {
+	unsigned int poll_count = 0;
 	int ret;
 
 	do {
 		ret = q->mq_ops->poll(hctx, iob);
-		if (ret > 0)
+		if (ret > 0) {
+			if (poll_countp)
+				*poll_countp = poll_count;
 			return ret;
-		if (task_sigpending(current))
+		}
+		if (task_sigpending(current)) {
+			if (poll_countp)
+				*poll_countp = UINT_MAX;
 			return 1;
+		}
 		if (ret < 0 || (flags & BLK_POLL_ONESHOT))
 			break;
 		cpu_relax();
+		poll_count++;
 	} while (!need_resched());
 
+	if (poll_countp)
+		*poll_countp = poll_count;
 	return 0;
+}
+
+static int blk_hctx_poll(struct request_queue *q, struct blk_mq_hw_ctx *hctx,
+			 struct io_comp_batch *iob, unsigned int flags)
+{
+	return __blk_hctx_poll(q, hctx, iob, flags, NULL);
 }
 
 int blk_mq_poll(struct request_queue *q, blk_qc_t cookie,
@@ -5349,27 +5391,23 @@ int blk_mq_poll(struct request_queue *q, blk_qc_t cookie,
 	return blk_hctx_poll(q, q->queue_hw_ctx[cookie], iob, flags);
 }
 
-static void blk_mq_poll_lhp_sleep(struct request_queue *q, struct bio *bio,
-				  unsigned int flags)
+static bool blk_mq_poll_sleep_nsec(struct bio *bio, u64 nsecs)
 {
 	struct hrtimer_sleeper hs;
 	ktime_t kt;
 
-	if (flags & BLK_POLL_ONESHOT)
-		return;
-
-	if (q->poll_nsec <= 0)
-		return;
-
 	if (!bio)
-		return;
+		return false;
+
+	if (!nsecs)
+		return false;
 
 	if (bio_flagged(bio, BIO_LHP_POLL_SLEPT))
-		return;
+		return false;
 
 	bio_set_flag(bio, BIO_LHP_POLL_SLEPT);
 
-	kt = ktime_set(0, q->poll_nsec);
+	kt = ktime_set(0, nsecs);
 
 	hrtimer_setup_sleeper_on_stack(&hs, CLOCK_MONOTONIC,
 				       HRTIMER_MODE_REL);
@@ -5384,35 +5422,180 @@ static void blk_mq_poll_lhp_sleep(struct request_queue *q, struct bio *bio,
 	hrtimer_cancel(&hs.timer);
 	__set_current_state(TASK_RUNNING);
 	destroy_hrtimer_on_stack(&hs.timer);
+
+	return true;
 }
 
-static void blk_mq_poll_pas_prepare(struct request_queue *q, struct bio *bio,
-	unsigned int flags)
+static void blk_mq_poll_lhp_sleep(struct request_queue *q, struct bio *bio,
+				  unsigned int flags)
 {
-	if (!q->pas_enabled)
+	if (flags & BLK_POLL_ONESHOT)
 		return;
+
+	if (q->poll_nsec <= 0)
+		return;
+
+	blk_mq_poll_sleep_nsec(bio, q->poll_nsec);
+}
+
+/* Match the 5.18 DPAS bucket mapping: read uses even, write uses odd buckets. */
+static int blk_mq_poll_pas_bucket(const struct bio *bio)
+{
+	unsigned int sectors;
+	int ddir;
+	int bucket;
 
 	if (!bio)
+		return -1;
+
+	if (bio_op(bio) != REQ_OP_READ && bio_op(bio) != REQ_OP_WRITE)
+		return -1;
+
+	sectors = bio_sectors(bio);
+	if (!sectors)
+		return -1;
+
+	ddir = op_is_write(bio_op(bio)) ? 1 : 0;
+	bucket = ddir + 2 * ilog2(sectors);
+
+	if (bucket >= BLK_MQ_POLL_STATS_BKTS)
+		return ddir + BLK_MQ_POLL_STATS_BKTS - 2;
+
+	return bucket;
+}
+
+static void blk_mq_poll_pas_update_duration(struct request_queue *q,
+					    struct blk_rq_pas_stat *stat)
+{
+	int cur_case;
+
+	if (!stat->update_req)
 		return;
 
-	/* First checkpoint: no sleep, counter only. */
+	stat->update_req = 0;
+
+	cur_case = stat->sr_pnlt * 2 + stat->sr_last;
+	switch (cur_case) {
+	case 0: /* overslept, overslept */
+		stat->adj -= stat->dn;
+		break;
+	case 1: /* overslept, underslept */
+		stat->adj = q->div + stat->up;
+		break;
+	case 2: /* underslept, overslept */
+		stat->adj = q->div - stat->dn;
+		break;
+	case 3: /* underslept, underslept */
+		stat->adj += stat->up;
+		break;
+	default:
+		stat->adj = q->div;
+		break;
+	}
+
+	if (stat->adj <= 0)
+		stat->adj = q->div;
+
+	stat->dur = mul_u64_u64_div_u64(stat->dur, (u64)stat->adj, q->div);
+	if (stat->dur < q->d_init)
+		stat->dur = q->d_init;
+
+	stat->dur_cnt++;
+}
+
+static void blk_mq_poll_pas_sleep(struct request_queue *q, struct bio *bio,
+				  unsigned int flags,
+				  struct blk_mq_pas_poll_ctx *ctx)
+{
+	struct blk_rq_pas_stat *stat;
+	u8 dur_cnt;
+	int bucket;
+	int cpu;
+	u64 nsecs;
+
+	if (!q->pas_enabled || !q->pas_stat)
+		return;
+
+	if (flags & BLK_POLL_ONESHOT)
+		return;
+
+	if (!bio || bio_flagged(bio, BIO_LHP_POLL_SLEPT))
+		return;
+
+	bucket = blk_mq_poll_pas_bucket(bio);
+	if (bucket < 0)
+		return;
+
+	cpu = get_cpu();
+	stat = per_cpu_ptr(q->pas_stat, cpu);
+
+	blk_mq_poll_pas_update_duration(q, &stat[bucket]);
+
+	nsecs = READ_ONCE(stat[bucket].dur);
+	dur_cnt = stat[bucket].dur_cnt;
 	q->last_poll_count++;
+	put_cpu();
+
+	if (!blk_mq_poll_sleep_nsec(bio, nsecs))
+		return;
+
+	ctx->active = true;
+	ctx->cpu = cpu;
+	ctx->bucket = bucket;
+	ctx->dur_cnt = dur_cnt;
+	ctx->dur = nsecs;
+}
+
+static void blk_mq_poll_pas_complete(struct request_queue *q,
+				     struct blk_mq_pas_poll_ctx *ctx,
+				     int ret, unsigned int poll_count)
+{
+	struct blk_rq_pas_stat *stat;
+	int cpu;
+
+	if (!ctx->active || ret <= 0 || poll_count == UINT_MAX || !q->pas_stat)
+		return;
+
+	cpu = get_cpu();
+	if (cpu != ctx->cpu) {
+		put_cpu();
+		return;
+	}
+
+	stat = per_cpu_ptr(q->pas_stat, ctx->cpu);
+	if (ctx->dur_cnt == stat[ctx->bucket].dur_cnt &&
+	    stat[ctx->bucket].dur_cnt != stat[ctx->bucket].dur_cnt_checked) {
+		stat[ctx->bucket].dur_cnt_checked = stat[ctx->bucket].dur_cnt;
+		stat[ctx->bucket].sr_pnlt = stat[ctx->bucket].sr_last;
+		stat[ctx->bucket].sr_last = poll_count <= q->poll_threshold ? 0 : 1;
+		stat[ctx->bucket].update_req = 1;
+	}
+
+	put_cpu();
 }
 
 int blk_mq_poll_bio(struct request_queue *q, struct bio *bio, blk_qc_t cookie,
 		struct io_comp_batch *iob, unsigned int flags)
 {
+	struct blk_mq_pas_poll_ctx pas = {};
 	struct blk_mq_hw_ctx *hctx;
+	unsigned int poll_count = 0;
+	int ret;
 
 	if (!blk_mq_can_poll(q))
 		return 0;
 
 	hctx = q->queue_hw_ctx[cookie];
 
-	blk_mq_poll_lhp_sleep(q, bio, flags);
-	blk_mq_poll_pas_prepare(q, bio, flags);
+	if (q->pas_enabled)
+		blk_mq_poll_pas_sleep(q, bio, flags, &pas);
+	else
+		blk_mq_poll_lhp_sleep(q, bio, flags);
 
-	return blk_hctx_poll(q, hctx, iob, flags);
+	ret = __blk_hctx_poll(q, hctx, iob, flags, &poll_count);
+	blk_mq_poll_pas_complete(q, &pas, ret, poll_count);
+
+	return ret;
 }
 
 int blk_rq_poll(struct request *rq, struct io_comp_batch *iob,
