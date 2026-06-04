@@ -5501,6 +5501,36 @@ static void blk_mq_poll_pas_update_duration(struct request_queue *q,
 		stat->dur = q->d_init;
 
 	stat->dur_cnt++;
+
+	if (q->pas_adaptive_enabled) {
+		if (cur_case == 0 || cur_case == 3) {
+			if (q->pas_adaptive_enabled == 1) {
+				/* DPAS 1: adjust dn, derive from dn */
+				stat->dn = stat->dn * (q->div + q->heat_up) / q->div;
+				if (stat->dn > q->max_dn)
+					stat->dn = q->max_dn;
+
+				stat->up = stat->dn / q->updn_ratio;
+			} else if (q->pas_adaptive_enabled == 2) {
+				/* DPAS 2: adjust up only */
+				stat->up = stat->up * (q->div + q->heat_up) / q->div;
+				if (stat->up > q->div / 10)
+					stat->up = q->div / 10;
+			}
+		} else {
+			stat->up = stat->up * (q->div - q->cool_dn) / q->div;
+
+			if (q->pas_adaptive_enabled == 1) {
+				if (stat->up < q->min_dn / q->updn_ratio)
+					stat->up = q->min_dn / q->updn_ratio;
+
+				stat->dn = stat->up * q->updn_ratio;
+			} else if (q->pas_adaptive_enabled == 2) {
+				if (stat->up < q->div / 10000)
+					stat->up = q->div / 10000;
+			}
+		}
+	}
 }
 
 static void blk_mq_poll_pas_sleep(struct request_queue *q, struct bio *bio,
