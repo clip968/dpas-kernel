@@ -4,8 +4,10 @@
  *
  * Copyright (C) 2016 Jens Axboe
  */
+
 #include <linux/kernel.h>
 #include <linux/rculist.h>
+#include <linux/slab.h>
 
 #include "blk-stat.h"
 #include "blk-mq.h"
@@ -225,4 +227,26 @@ void blk_free_queue_stats(struct blk_queue_stats *stats)
 	WARN_ON(!list_empty(&stats->callbacks));
 
 	kfree(stats);
+}
+
+/* q->poll_stat 배열을 처음 한 번 만드는 역할
+이 함수는 처음 성공적으로 할당한 순간 false 반환.
+그래서 adaptive LHp 첫 호출에서는 sleep 시간이 0초일 수 있음*/
+bool blk_stats_alloc_enable(struct request_queue *q)
+{
+	struct blk_rq_stat *poll_stat;
+
+	poll_stat = kcalloc(BLK_MQ_POLL_STATS_BKTS, sizeof(*poll_stat),
+				GFP_ATOMIC);
+
+	if (!poll_stat)
+		return false;
+	/* 여러 cpu가 동시에 처음 활성화하려 할 수 있기 때문에 cmpxchg 사용 */
+	if (cmpxchg(&q->poll_stat, NULL, poll_stat) != NULL) {
+		kfree(poll_stat);
+		return true;
+	}
+
+	blk_stat_add_callback(q, q->poll_cb);
+	return false;
 }

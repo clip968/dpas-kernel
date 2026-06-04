@@ -173,5 +173,6 @@ static inline void blk_stat_activate_msecs(struct blk_stat_callback *cb,
 void blk_rq_stat_add(struct blk_rq_stat *, u64);
 void blk_rq_stat_sum(struct blk_rq_stat *, struct blk_rq_stat *);
 void blk_rq_stat_init(struct blk_rq_stat *);
+bool blk_stats_alloc_enable(struct request_queue *q);
 
 #endif

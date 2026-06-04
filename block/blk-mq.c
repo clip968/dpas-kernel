@@ -5,6 +5,8 @@
  * Copyright (C) 2013-2014 Jens Axboe
  * Copyright (C) 2013-2014 Christoph Hellwig
  */
+#include <linux/blk-mq.h>
+#include <linux/log2.h>
 #include <linux/kernel.h>
 #include <linux/math64.h>
 #include <linux/module.h>
@@ -48,6 +50,9 @@ static DEFINE_PER_CPU(struct llist_head, blk_cpu_done);
 static DEFINE_PER_CPU(call_single_data_t, blk_cpu_csd);
 static DEFINE_MUTEX(blk_mq_cpuhp_lock);
 
+static void blk_mq_poll_stats_start(struct request_queue *q);
+static void blk_mq_poll_stats_fn(struct blk_stat_callback *cb);
+static int blk_mq_poll_pas_bucket(const struct bio *bio);
 static void blk_mq_insert_request(struct request *rq, blk_insert_t flags);
 static void blk_mq_request_bypass_insert(struct request *rq,
 		blk_insert_t flags);
@@ -55,6 +60,23 @@ static void blk_mq_try_issue_list_directly(struct blk_mq_hw_ctx *hctx,
 		struct list_head *list);
 static int blk_hctx_poll(struct request_queue *q, struct blk_mq_hw_ctx *hctx,
 			 struct io_comp_batch *iob, unsigned int flags);
+
+/* 완료된 request를 어느 통계 bucket에 넣을지 정하는 함수 */
+static int blk_mq_poll_stats_bkt(const struct request *rq)
+{
+	int ddir, sectors, bucket;
+
+	ddir = rq_data_dir(rq);
+	sectors = blk_rq_stats_sectors(rq);
+	if (!sectors)
+		return -1;
+
+	bucket = ddir + 2 * ilog2(sectors);
+	if (bucket >= BLK_MQ_POLL_STATS_BKTS)
+		return ddir + BLK_MQ_POLL_STATS_BKTS - 2;
+
+	return bucket;
+}
 
 static void init_pas_stat(struct blk_rq_pas_stat *stat,
 		u32 dur, long long adj, long long up, long long dn)
@@ -1189,8 +1211,12 @@ static inline void blk_account_io_start(struct request *req)
 
 static inline void __blk_mq_end_request_acct(struct request *rq, u64 now)
 {
-	if (rq->rq_flags & RQF_STATS)
+	if (rq->rq_flags & RQF_STATS) {
+		/*통계 수집 타이머 on */
+		blk_mq_poll_stats_start(rq->q);
+		/* 이번 request의 completion latency sample을 통계에 추가 */
 		blk_stat_add(rq, now);
+	}
 
 	blk_mq_sched_completed_request(rq, now);
 	blk_account_io_done(rq, now);
@@ -4728,8 +4754,17 @@ int blk_mq_init_allocated_queue(struct blk_mq_tag_set *set,
 	 */
 	q->tag_set = set;
 
-	if (blk_mq_alloc_ctxs(q))
+	/* queue가 만들어질 때 polling latency 통계를 모을 callback 객체 */
+	q->poll_cb = blk_stat_alloc_callback(blk_mq_poll_stats_fn, /* 통계 수집 window가 끝났을 때 실행할 함수 */
+					blk_mq_poll_stats_bkt, /* request를 어느 bucket에 넣을지 정하는 함수 */
+					BLK_MQ_POLL_STATS_BKTS, /* bucket 개수 */
+					q); /* callback에서 다시 접근할 request_queue */
+
+	if (!q->poll_cb)
 		goto err_exit;
+
+	if (blk_mq_alloc_ctxs(q))
+		goto err_poll;
 
 	/* init q->mq_kobj and sw queues' kobjects */
 	blk_mq_sysfs_init(q);
@@ -4796,6 +4831,9 @@ int blk_mq_init_allocated_queue(struct blk_mq_tag_set *set,
 
 err_hctxs:
 	blk_mq_release(q);
+err_poll: /* queue 초기화 중간에 실패했을 때 메모리를 정리하는 코드 */
+	blk_stat_free_callback(q->poll_cb);
+	q->poll_cb = NULL;
 err_exit:
 	q->mq_ops = NULL;
 	return -ENOMEM;
@@ -5426,16 +5464,73 @@ static bool blk_mq_poll_sleep_nsec(struct bio *bio, u64 nsecs)
 	return true;
 }
 
+/* 100ms 동안 completion latency sample을 모으도록 timer를 켬 */
+static bool blk_poll_stats_enable(struct request_queue *q)
+{
+	if (q->poll_stat)
+		return true;
+
+	return blk_stats_alloc_enable(q);
+}
+
+static void blk_mq_poll_stats_start(struct request_queue *q)
+{
+	if (!q->poll_stat || blk_stat_is_active(q->poll_cb))
+		return;
+
+	blk_stat_activate_msecs(q->poll_cb, 100);
+}
+
+static void blk_mq_poll_stats_fn(struct blk_stat_callback *cb)
+{
+	struct request_queue *q = cb->data;
+	int bucket;
+
+	/* 방금동안 모인 latency 통계를 q->poll_stat에 복사 */
+	for (bucket = 0; bucket < BLK_MQ_POLL_STATS_BKTS; bucket++) {
+		if (cb->stat[bucket].nr_samples)
+			q->poll_stat[bucket] = cb->stat[bucket];
+	}
+}
+
+/* 실제 lhp sleep 시간 계산하는 함수 */
+static u64 blk_mq_poll_lhp_nsecs(struct request_queue *q, struct bio *bio)
+{
+	int bucket;
+
+	if (!blk_poll_stats_enable(q))
+		return 0;
+
+	bucket = blk_mq_poll_pas_bucket(bio);
+	if (bucket < 0)
+		return 0;
+
+	if (q->poll_stat[bucket].nr_samples)
+		return (q->poll_stat[bucket].mean + 1) / 2;
+
+	return 0;
+}
+
 static void blk_mq_poll_lhp_sleep(struct request_queue *q, struct bio *bio,
 				  unsigned int flags)
 {
+	u64 nsecs;
+
 	if (flags & BLK_POLL_ONESHOT)
 		return;
 
-	if (q->poll_nsec <= 0)
+	/* classic polling, sleep 없음 */
+	if (q->poll_nsec < 0)
 		return;
 
-	blk_mq_poll_sleep_nsec(bio, q->poll_nsec);
+	/* fixed LHP, 사용자가 지정한 시간만큼 sleep */
+	if (q->poll_nsec > 0)
+		nsecs = q->poll_nsec;
+	/* adaptive LHP, 과거 평균 latency / 2만큼 sleep */
+	else
+		nsecs = blk_mq_poll_lhp_nsecs(q, bio);
+
+	blk_mq_poll_sleep_nsec(bio, nsecs);
 }
 
 /* Match the 5.18 DPAS bucket mapping: read uses even, write uses odd buckets. */

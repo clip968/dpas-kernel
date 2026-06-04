@@ -536,7 +536,7 @@ static ssize_t queue_poll_delay_store(struct gendisk *disk, const char *page,
 
 	if (val == BLK_MQ_POLL_CLASSIC)
 		q->poll_nsec = BLK_MQ_POLL_CLASSIC;
-	else if (val > 0)
+	else if (val >= 0)
 		q->poll_nsec = val * 1000;
 	else
 		return -EINVAL;
