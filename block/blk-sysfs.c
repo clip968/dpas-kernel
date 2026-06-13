@@ -792,6 +792,9 @@ QUEUE_DPAS_LL_RW(queue_heat_up, heat_up, 0, INT_MAX)
 QUEUE_DPAS_LL_RW(queue_cool_dn, cool_dn, 0, 999999)
 QUEUE_DPAS_LL_RW(queue_min_dn, min_dn, 10000, 990000)
 QUEUE_DPAS_LL_RW(queue_max_dn, max_dn, 10000, 990000)
+/* DPAS switch_param1~7: PAS->OL tf, OL->PAS QD(x10), OL->INT QD(x10),
+ * PAS->CP 허용, PAS/OL 평가 개수, CP 평가 개수, INT 평가 개수.
+ */
 QUEUE_DPAS_INT_RW(queue_switch_param1, switch_param1, -1, INT_MAX)
 QUEUE_DPAS_INT_RW(queue_switch_param2, switch_param2, -1, INT_MAX)
 QUEUE_DPAS_INT_RW(queue_switch_param3, switch_param3, -1, INT_MAX)

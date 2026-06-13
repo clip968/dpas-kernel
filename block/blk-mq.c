@@ -4803,13 +4803,13 @@ int blk_mq_init_allocated_queue(struct blk_mq_tag_set *set,
 	q->max_dn = 100000;
 	q->updn_ratio = 10;
 
-	q->switch_param1 = 0;
-	q->switch_param2 = 10;
-	q->switch_param3 = 10;
-	q->switch_param4 = 1;
-	q->switch_param5 = 100;
-	q->switch_param6 = 1000;
-	q->switch_param7 = 10000;
+	q->switch_param1 = 0;     /* PAS->OL: tf 임계값 */
+	q->switch_param2 = 10;    /* OL->PAS: 평균 QD 임계값(x10) */
+	q->switch_param3 = 10;    /* OL->INT: 평균 QD 임계값(x10) */
+	q->switch_param4 = 1;     /* PAS->CP 전환 허용 */
+	q->switch_param5 = 100;   /* PAS/OL 평가 I/O 개수 */
+	q->switch_param6 = 1000;  /* CP 평가 I/O 개수 */
+	q->switch_param7 = 10000; /* INT 평가 I/O 개수 */
 
 	q->pas_stat = __alloc_percpu(BLK_MQ_POLL_STATS_BKTS *
 			sizeof(struct blk_rq_pas_stat),

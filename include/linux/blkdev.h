@@ -522,13 +522,13 @@ struct request_queue {
 	int poll_threshold;
 	int logging_enabled;
 	int switch_enabled;
-	int switch_param1;
-	int switch_param2;
-	int switch_param3;
-	int switch_param4;
-	int switch_param5;
-	int switch_param6;
-	int switch_param7;
+	int switch_param1; /* DPAS: PAS->OL 전환 tf 임계값 */
+	int switch_param2; /* DPAS: OL->PAS 전환 평균 QD 임계값(x10) */
+	int switch_param3; /* DPAS: OL->INT 전환 평균 QD 임계값(x10) */
+	int switch_param4; /* DPAS: PAS->CP 전환 허용 여부 */
+	int switch_param5; /* DPAS: PAS/OL 모드 평가 I/O 개수 */
+	int switch_param6; /* DPAS: CP 모드 평가 I/O 개수 */
+	int switch_param7; /* DPAS: INT 모드 평가 I/O 개수 */
 	u64 div;
 	u32 d_init; /* unit: us, int -> u32? */
 	long long up_init;
