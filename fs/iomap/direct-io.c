@@ -3,6 +3,7 @@
  * Copyright (C) 2010 Red Hat, Inc.
  * Copyright (c) 2016-2025 Christoph Hellwig.
  */
+#include <linux/blkdev.h>
 #include <linux/bio-integrity.h>
 #include <linux/blk-crypto.h>
 #include <linux/fscrypt.h>
@@ -73,8 +74,8 @@ static void iomap_dio_submit_bio(const struct iomap_iter *iter,
 	 * exposure through iocb->private.
 	 */
 	if (iocb->ki_flags & IOCB_HIPRI) {
-		bio_set_polled(bio, iocb);
-		dio->submit.poll_bio = bio;
+		if (blk_dpas_prepare_bio(bdev_get_queue(bio->bi_bdev), bio, iocb))
+			dio->submit.poll_bio = bio;
 	}
 
 	if (dio->dops && dio->dops->submit_io) {

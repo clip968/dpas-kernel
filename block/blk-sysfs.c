@@ -2,6 +2,9 @@
 /*
  * Functions related to sysfs handling
  */
+#include "asm-generic/errno-base.h"
+#include "linux/kstrtox.h"
+#include "linux/types.h"
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/module.h>
@@ -782,6 +785,50 @@ static ssize_t queue_dn_init_store(struct gendisk *disk, const char *page,
 	return ret;
 }
 
+static void queue_dpas_reset_switch_state(struct request_queue *q)
+{
+	/* switch_enabled를 다시 쓸 때는 새 측정 window를 PAS에서 시작한다. */
+	q->dpas_mode = DPAS_MODE_PAS;
+	q->dpas_cp_cnt = 0;
+	q->dpas_int_cnt = 0;
+	q->dpas_pas_cnt = 0;
+	q->dpas_ol_cnt = 0;
+	q->dpas_qd = 0;
+	q->dpas_qd_sum = 0;
+	q->dpas_tf = 0;
+}
+
+static ssize_t queue_switch_enabled_show(struct gendisk *disk, char *page)
+{
+	return sysfs_emit(page, "%d\n", disk->queue->switch_enabled);
+}
+
+static ssize_t queue_switch_enabled_store(struct gendisk *disk, const char *page, size_t count)
+{
+	struct request_queue *q = disk->queue;
+	unsigned long flags_lock;
+	int err, val;
+
+	if (!queue_dpas_poll_capable(q))
+		return -EINVAL;
+
+	err = kstrtoint(page, 10, &val);
+	if (err < 0)
+		return err;
+	if (val < 0 || val > 1)
+		return -EINVAL;
+
+	/*
+	 * submit path와 poll path가 동시에 mode를 볼 수 있으므로
+	 * lock 안에서 reset한다.
+	 */
+	spin_lock_irqsave(&q->dpas_lock, flags_lock);
+	q->switch_enabled = val;
+	queue_dpas_reset_switch_state(q);
+	spin_unlock_irqrestore(&q->dpas_lock, flags_lock);
+
+	return count;
+}
 QUEUE_DPAS_INT_RW(queue_pas_enabled, pas_enabled, 0, 1)
 QUEUE_DPAS_INT_RW(queue_pas_adaptive_enabled, pas_adaptive_enabled, 0, 2)
 QUEUE_DPAS_INT_RW(queue_ehp_enabled, ehp_enabled, 0, 1)
@@ -875,6 +922,7 @@ QUEUE_LIM_RO_ENTRY(queue_chunk_sectors, "chunk_sectors");
 QUEUE_LIM_RO_ENTRY(queue_io_min, "minimum_io_size");
 QUEUE_LIM_RO_ENTRY(queue_io_opt, "optimal_io_size");
 
+QUEUE_RW_ENTRY(queue_switch_enabled, "switch_enabled");
 QUEUE_LIM_RO_ENTRY(queue_max_discard_segments, "max_discard_segments");
 QUEUE_LIM_RO_ENTRY(queue_discard_granularity, "discard_granularity");
 QUEUE_LIM_RO_ENTRY(queue_max_hw_discard_sectors, "discard_max_hw_bytes");
@@ -1090,6 +1138,7 @@ static const struct attribute *const blk_mq_queue_attrs[] = {
 	&queue_cool_dn_entry.attr,
 	&queue_min_dn_entry.attr,
 	&queue_max_dn_entry.attr,
+	&queue_switch_enabled_entry.attr,
 	&queue_switch_param1_entry.attr,
 	&queue_switch_param2_entry.attr,
 	&queue_switch_param3_entry.attr,

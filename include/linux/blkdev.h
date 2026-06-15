@@ -487,6 +487,14 @@ struct blk_independent_access_ranges {
 	struct blk_independent_access_range	ia_range[];
 };
 
+enum dpas_mode {
+	/* full DPAS가 I/O를 보낼 때 선택하는 실행 모드 */
+	DPAS_MODE_INT = 0,
+	DPAS_MODE_CP = 1,
+	DPAS_MODE_PAS = 2,
+	DPAS_MODE_OL = 3,
+};
+
 struct request_queue {
 	/*
 	 * The queue owner gets to use this for whatever they like.
@@ -514,6 +522,21 @@ struct request_queue {
 
 	struct blk_rq_pas_stat __percpu *pas_stat;
 	int			last_poll_count;
+
+	spinlock_t		dpas_lock; /* DPAS mode/counter/qd 보호 */
+	enum dpas_mode		dpas_mode;
+
+	/* mode별 평가 window에서 submit된 HIPRI I/O 개수 */
+	u32			dpas_cp_cnt;
+	u32			dpas_pas_cnt;
+	u32			dpas_ol_cnt;
+	u32			dpas_int_cnt;
+
+	/* PAS/OL 전환 판단에 쓰는 poll sleep 구간의 queue depth 표본 */
+	u32			dpas_qd;
+	u64			dpas_qd_sum;
+	/* PAS duration이 d_init 최저값에 걸린 횟수 */
+	u32			dpas_tf;
 
 	int pas_enabled;
 	int pas_adaptive_enabled;
@@ -1090,6 +1113,8 @@ const char *blk_status_to_str(blk_status_t status);
 int bio_poll(struct bio *bio, struct io_comp_batch *iob, unsigned int flags);
 int iocb_bio_iopoll(struct kiocb *kiocb, struct io_comp_batch *iob,
 			unsigned int flags);
+bool blk_dpas_prepare_bio(struct request_queue *q, struct bio *bio,
+			  struct kiocb *iocb);
 
 static inline struct request_queue *bdev_get_queue(struct block_device *bdev)
 {

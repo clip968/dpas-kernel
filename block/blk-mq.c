@@ -5,6 +5,7 @@
  * Copyright (C) 2013-2014 Jens Axboe
  * Copyright (C) 2013-2014 Christoph Hellwig
  */
+#include <linux/spinlock.h>
 #include <linux/blk-mq.h>
 #include <linux/log2.h>
 #include <linux/kernel.h>
@@ -4772,6 +4773,18 @@ int blk_mq_init_allocated_queue(struct blk_mq_tag_set *set,
 	INIT_LIST_HEAD(&q->unused_hctx_list);
 	spin_lock_init(&q->unused_hctx_lock);
 
+	/* full DPAS는 request_queue 단위로 현재 모드와 평가 카운터를 가진다. */
+	spin_lock_init(&q->dpas_lock);
+	q->switch_enabled = 0;
+	q->dpas_mode = DPAS_MODE_PAS;
+	q->dpas_cp_cnt = 0;
+	q->dpas_pas_cnt = 0;
+	q->dpas_ol_cnt = 0;
+	q->dpas_int_cnt = 0;
+	q->dpas_qd = 0;
+	q->dpas_qd_sum = 0;
+	q->dpas_tf = 0;
+
 	blk_mq_realloc_hw_ctxs(set, q);
 	if (!q->nr_hw_queues)
 		goto err_hctxs;
@@ -5592,8 +5605,20 @@ static void blk_mq_poll_pas_update_duration(struct request_queue *q,
 		stat->adj = q->div;
 
 	stat->dur = mul_u64_u64_div_u64(stat->dur, (u64)stat->adj, q->div);
-	if (stat->dur < q->d_init)
+	if (stat->dur < q->d_init) {
 		stat->dur = q->d_init;
+		if (q->switch_enabled) {
+			unsigned long lock_flags;
+
+			/*
+			 * duration이 최저값에 자주 걸리면
+			 * PAS->OL 판단 근거가 된다.
+			 */
+			spin_lock_irqsave(&q->dpas_lock, lock_flags);
+			q->dpas_tf++;
+			spin_unlock_irqrestore(&q->dpas_lock, lock_flags);
+		}
+	}
 
 	stat->dur_cnt++;
 
@@ -5628,6 +5653,90 @@ static void blk_mq_poll_pas_update_duration(struct request_queue *q,
 	}
 }
 
+static void blk_dpas_maybe_switch_mode(struct request_queue *q)
+{
+	s64 avg_qd;
+
+	lockdep_assert_held(&q->dpas_lock);
+
+	if (!q->switch_enabled)
+		return;
+
+	switch (q->dpas_mode) {
+	case DPAS_MODE_CP:
+		/*
+		 * CP는 일정 I/O 개수만큼 classic polling을 유지한 뒤
+		 * PAS로 복귀한다.
+		 */
+		if ((s64)q->dpas_cp_cnt >= q->switch_param6) {
+			q->dpas_mode = DPAS_MODE_PAS;
+			q->dpas_pas_cnt = 0;
+			q->dpas_qd_sum = 0;
+			q->dpas_tf = 0;
+		}
+		break;
+	case DPAS_MODE_PAS:
+		if ((s64)q->dpas_pas_cnt < q->switch_param5)
+			break;
+
+		/*
+		 * qd_sum은 10배 스케일 평균 QD로 바꿔
+		 * 기존 switch_param 의미와 맞춘다.
+		 */
+		avg_qd = (s64)q->dpas_qd_sum * 10 / q->dpas_pas_cnt;
+
+		if ((s64)q->dpas_tf > q->switch_param1) {
+			/*
+			 * sleep 보정이 d_init에 자주 막히면
+			 * 장치가 바쁘다고 보고 OL로 간다.
+			 */
+			q->dpas_mode = DPAS_MODE_OL;
+			q->dpas_ol_cnt = 0;
+		} else if (q->switch_param4 > 0 && avg_qd == 10) {
+			/*
+			 * 평균 QD가 1 수준이면 sleep 이득이 작으므로
+			 * CP를 다시 시도한다.
+			 */
+			q->dpas_mode = DPAS_MODE_CP;
+			q->dpas_cp_cnt = 0;
+		} else {
+			q->dpas_pas_cnt = 0;
+		}
+
+		q->dpas_qd_sum = 0;
+		q->dpas_tf = 0;
+		break;
+
+	case DPAS_MODE_OL:
+		if ((s64)q->dpas_ol_cnt < q->switch_param5)
+			break;
+
+		/* OL에서는 평균 QD가 낮아지면 PAS, 높아지면 INT로 이동한다. */
+		avg_qd = (s64)q->dpas_qd_sum * 10 / q->dpas_ol_cnt;
+
+		if (avg_qd <= q->switch_param2) {
+			q->dpas_mode = DPAS_MODE_PAS;
+			q->dpas_pas_cnt = 0;
+		} else if (avg_qd > q->switch_param3) {
+			q->dpas_mode = DPAS_MODE_INT;
+			q->dpas_int_cnt = 0;
+		} else {
+			q->dpas_ol_cnt = 0;
+		}
+
+		q->dpas_qd_sum = 0;
+		q->dpas_tf = 0;
+		break;
+
+	case DPAS_MODE_INT:
+		/*
+		 * INT I/O는 poll 경로를 타지 않으므로
+		 * INT->OL은 submit helper에서 처리한다.
+		 */
+		break;
+	}
+}
+
 static void blk_mq_poll_pas_sleep(struct request_queue *q, struct bio *bio,
 				  unsigned int flags,
 				  struct blk_mq_pas_poll_ctx *ctx)
@@ -5637,6 +5746,18 @@ static void blk_mq_poll_pas_sleep(struct request_queue *q, struct bio *bio,
 	int bucket;
 	int cpu;
 	u64 nsecs;
+	unsigned long lock_flags;
+
+	if (q->switch_enabled && q->dpas_mode == DPAS_MODE_CP) {
+		/*
+		 * CP는 classic polling이므로 PAS sleep을 건너뛰고
+		 * 전이 조건만 확인한다.
+		 */
+		spin_lock_irqsave(&q->dpas_lock, lock_flags);
+		blk_dpas_maybe_switch_mode(q);
+		spin_unlock_irqrestore(&q->dpas_lock, lock_flags);
+		return;
+	}
 
 	if (!q->pas_enabled || !q->pas_stat)
 		return;
@@ -5654,6 +5775,17 @@ static void blk_mq_poll_pas_sleep(struct request_queue *q, struct bio *bio,
 	cpu = get_cpu();
 	stat = per_cpu_ptr(q->pas_stat, cpu);
 
+	if (q->switch_enabled) {
+		/*
+		 * sleep을 시도하는 동안의 depth 표본을
+		 * PAS/OL 전이 판단에 누적한다.
+		 */
+		spin_lock_irqsave(&q->dpas_lock, lock_flags);
+		q->dpas_qd++;
+		q->dpas_qd_sum += q->dpas_qd;
+		spin_unlock_irqrestore(&q->dpas_lock, lock_flags);
+	}
+
 	blk_mq_poll_pas_update_duration(q, &stat[bucket]);
 
 	nsecs = READ_ONCE(stat[bucket].dur);
@@ -5662,13 +5794,21 @@ static void blk_mq_poll_pas_sleep(struct request_queue *q, struct bio *bio,
 	put_cpu();
 
 	if (!blk_mq_poll_sleep_nsec(bio, nsecs))
-		return;
+		goto out_qd;
 
 	ctx->active = true;
 	ctx->cpu = cpu;
 	ctx->bucket = bucket;
 	ctx->dur_cnt = dur_cnt;
 	ctx->dur = nsecs;
+
+out_qd:
+	if (q->switch_enabled) {
+		spin_lock_irqsave(&q->dpas_lock, lock_flags);
+		if (q->dpas_qd)
+			q->dpas_qd--;
+		spin_unlock_irqrestore(&q->dpas_lock, lock_flags);
+	}
 }
 
 static void blk_mq_poll_pas_complete(struct request_queue *q,
@@ -5694,6 +5834,15 @@ static void blk_mq_poll_pas_complete(struct request_queue *q,
 		stat[ctx->bucket].sr_pnlt = stat[ctx->bucket].sr_last;
 		stat[ctx->bucket].sr_last = poll_count <= q->poll_threshold ? 0 : 1;
 		stat[ctx->bucket].update_req = 1;
+	}
+
+	if (q->switch_enabled) {
+		unsigned long lock_flags;
+
+		/* completion 결과가 반영된 뒤 mode window가 끝났는지 확인한다. */
+		spin_lock_irqsave(&q->dpas_lock, lock_flags);
+		blk_dpas_maybe_switch_mode(q);
+		spin_unlock_irqrestore(&q->dpas_lock, lock_flags);
 	}
 
 	put_cpu();

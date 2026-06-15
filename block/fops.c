@@ -4,6 +4,7 @@
  * Copyright (C) 2001  Andrea Arcangeli <andrea@suse.de> SuSE
  * Copyright (C) 2016 - 2020 Christoph Hellwig
  */
+#include <linux/blk_types.h>
 #include <linux/init.h>
 #include <linux/mm.h>
 #include <linux/blkdev.h>
@@ -378,8 +379,8 @@ static ssize_t __blkdev_direct_IO_async(struct kiocb *iocb,
 	if (iocb->ki_flags & IOCB_NOWAIT)
 		bio->bi_opf |= REQ_NOWAIT;
 
-	if (iocb->ki_flags & IOCB_HIPRI) {
-		bio->bi_opf |= REQ_POLLED;
+	if (iocb->ki_flags & IOCB_HIPRI &&
+	    blk_dpas_prepare_bio(bdev_get_queue(bio->bi_bdev), bio, iocb)) {
 		submit_bio(bio);
 		WRITE_ONCE(iocb->private, bio);
 	} else {

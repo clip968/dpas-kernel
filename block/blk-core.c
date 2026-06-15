@@ -12,6 +12,8 @@
 /*
  * This handles all read/write requests to block devices
  */
+#include <linux/fs.h>
+#include <linux/spinlock.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/bio.h>
@@ -932,6 +934,84 @@ void submit_bio(struct bio *bio)
 	submit_bio_noacct(bio);
 }
 EXPORT_SYMBOL(submit_bio);
+
+/*
+ * HIPRI bio를 현재 full DPAS 모드에 맞게 polled/interrupt로 제출한다.
+ * INT 모드는 poll 경로를 타지 않으므로 INT->OL 전환 카운트도 여기서 센다.
+ */
+bool blk_dpas_prepare_bio(struct request_queue *q, struct bio *bio,
+			  struct kiocb *iocb)
+{
+	bool polled = true;
+	unsigned long flags;
+
+	if (!q->switch_enabled) {
+		/*
+		 * full DPAS가 꺼져 있으면 기존 HIPRI polling 동작을
+		 * 그대로 유지한다.
+		 */
+		bio_set_polled(bio, iocb);
+		return true;
+	}
+
+	spin_lock_irqsave(&q->dpas_lock, flags);
+
+	switch (q->dpas_mode) {
+	case DPAS_MODE_INT:
+		/*
+		 * interrupt 모드: 사용자의 HIPRI 요청이라도
+		 * REQ_POLLED를 제거한다.
+		 */
+		iocb->ki_flags &= ~IOCB_HIPRI;
+		bio_clear_polled(bio);
+		q->dpas_int_cnt++;
+
+		if (q->dpas_int_cnt >= q->switch_param7) {
+			/*
+			 * INT window를 채우면 overloaded polling 관찰
+			 * 단계로 돌아간다.
+			 */
+			q->dpas_mode = DPAS_MODE_OL;
+			q->dpas_ol_cnt = 0;
+			q->dpas_qd_sum = 0;
+			q->dpas_tf = 0;
+		}
+
+		polled = false;
+		break;
+	case DPAS_MODE_CP:
+		/* classic polling: sleep 없이 poll path에서 completion을 확인한다. */
+		bio_set_polled(bio, iocb);
+		q->dpas_cp_cnt++;
+		break;
+
+	case DPAS_MODE_PAS:
+		/*
+		 * PAS: poll 전에 adaptive sleep duration을
+		 * 적용할 수 있게 polled로 보낸다.
+		 */
+		bio_set_polled(bio, iocb);
+		q->dpas_pas_cnt++;
+		break;
+
+	case DPAS_MODE_OL:
+		/*
+		 * overload 관찰 모드: polled I/O로 보내고
+		 * QD 기반으로 다음 전이를 판단한다.
+		 */
+		bio_set_polled(bio, iocb);
+		q->dpas_ol_cnt++;
+		break;
+
+	default:
+		bio_set_polled(bio, iocb);
+		break;
+	}
+
+	spin_unlock_irqrestore(&q->dpas_lock, flags);
+	return polled;
+}
+EXPORT_SYMBOL_GPL(blk_dpas_prepare_bio);
 
 /**
  * bio_poll - poll for BIO completions
