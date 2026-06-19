@@ -971,6 +971,9 @@ bool blk_dpas_prepare_bio(struct request_queue *q, struct bio *bio,
 			 * INT window를 채우면 overloaded polling 관찰
 			 * 단계로 돌아간다.
 			 */
+			if (q->logging_enabled >= 2)
+				q->dpas_int_to_ol++;
+
 			q->dpas_mode = DPAS_MODE_OL;
 			q->dpas_ol_cnt = 0;
 			q->dpas_qd_sum = 0;

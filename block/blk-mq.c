@@ -4824,6 +4824,24 @@ int blk_mq_init_allocated_queue(struct blk_mq_tag_set *set,
 	q->switch_param6 = 1000;  /* CP 평가 I/O 개수 */
 	q->switch_param7 = 10000; /* INT 평가 I/O 개수 */
 
+	q->dpas_pas_eval = 0;
+	q->dpas_pas_to_cp = 0;
+	q->dpas_pas_to_ol = 0;
+	q->dpas_pas_stay_not_qd1 = 0;
+
+	q->dpas_ol_eval = 0;
+	q->dpas_ol_to_int = 0;
+	q->dpas_ol_to_pas = 0;
+	q->dpas_ol_stay_between = 0;
+
+	q->dpas_cp_to_pas = 0;
+	q->dpas_int_to_ol = 0;
+
+	q->dpas_last_avg_qd_x10 = -1;
+	q->dpas_min_avg_qd_x10 = -1;
+	q->dpas_max_avg_qd_x10 = -1;
+
+
 	q->pas_stat = __alloc_percpu(BLK_MQ_POLL_STATS_BKTS *
 			sizeof(struct blk_rq_pas_stat),
 			__alignof__(struct blk_rq_pas_stat));
@@ -5653,6 +5671,17 @@ static void blk_mq_poll_pas_update_duration(struct request_queue *q,
 	}
 }
 
+static void blk_dpas_record_avg_qd(struct request_queue *q, s64 avg_qd)
+{
+	q->dpas_last_avg_qd_x10 = avg_qd;
+
+	if (q->dpas_min_avg_qd_x10 < 0 || avg_qd < q->dpas_min_avg_qd_x10)
+		q->dpas_min_avg_qd_x10 = avg_qd;
+
+	if (q->dpas_max_avg_qd_x10 < 0 || avg_qd > q->dpas_max_avg_qd_x10)
+		q->dpas_max_avg_qd_x10 = avg_qd;
+}
+
 static void blk_dpas_maybe_switch_mode(struct request_queue *q)
 {
 	s64 avg_qd;
@@ -5669,6 +5698,9 @@ static void blk_dpas_maybe_switch_mode(struct request_queue *q)
 		 * PAS로 복귀한다.
 		 */
 		if ((s64)q->dpas_cp_cnt >= q->switch_param6) {
+			if (q->logging_enabled >= 2)
+				q->dpas_cp_to_pas++;
+
 			q->dpas_mode = DPAS_MODE_PAS;
 			q->dpas_pas_cnt = 0;
 			q->dpas_qd_sum = 0;
@@ -5685,11 +5717,18 @@ static void blk_dpas_maybe_switch_mode(struct request_queue *q)
 		 */
 		avg_qd = (s64)q->dpas_qd_sum * 10 / q->dpas_pas_cnt;
 
+		if (q->logging_enabled >= 2) {
+			q->dpas_pas_eval++;
+			blk_dpas_record_avg_qd(q, avg_qd);
+		}
+
 		if ((s64)q->dpas_tf > q->switch_param1) {
 			/*
 			 * sleep 보정이 d_init에 자주 막히면
 			 * 장치가 바쁘다고 보고 OL로 간다.
 			 */
+			if (q->logging_enabled >= 2)
+				q->dpas_pas_to_ol++;
 			q->dpas_mode = DPAS_MODE_OL;
 			q->dpas_ol_cnt = 0;
 		} else if (q->switch_param4 > 0 && avg_qd == 10) {
@@ -5697,9 +5736,13 @@ static void blk_dpas_maybe_switch_mode(struct request_queue *q)
 			 * 평균 QD가 1 수준이면 sleep 이득이 작으므로
 			 * CP를 다시 시도한다.
 			 */
+			if (q->logging_enabled >= 2)
+				q->dpas_pas_to_cp++;
 			q->dpas_mode = DPAS_MODE_CP;
 			q->dpas_cp_cnt = 0;
 		} else {
+			if (q->logging_enabled >= 2)
+				q->dpas_pas_stay_not_qd1++;
 			q->dpas_pas_cnt = 0;
 		}
 
@@ -5714,13 +5757,26 @@ static void blk_dpas_maybe_switch_mode(struct request_queue *q)
 		/* OL에서는 평균 QD가 낮아지면 PAS, 높아지면 INT로 이동한다. */
 		avg_qd = (s64)q->dpas_qd_sum * 10 / q->dpas_ol_cnt;
 
+		if (q->logging_enabled >= 2) {
+			q->dpas_ol_eval++;
+			blk_dpas_record_avg_qd(q, avg_qd);
+		}
+
 		if (avg_qd <= q->switch_param2) {
+			if (q->logging_enabled >= 2)
+				q->dpas_ol_to_pas++;
+
 			q->dpas_mode = DPAS_MODE_PAS;
 			q->dpas_pas_cnt = 0;
 		} else if (avg_qd > q->switch_param3) {
+			if (q->logging_enabled >= 2)
+				q->dpas_ol_to_int++;
+
 			q->dpas_mode = DPAS_MODE_INT;
 			q->dpas_int_cnt = 0;
 		} else {
+			if (q->logging_enabled >= 2)
+				q->dpas_ol_stay_between++;
 			q->dpas_ol_cnt = 0;
 		}
 

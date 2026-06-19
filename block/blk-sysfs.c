@@ -785,6 +785,26 @@ static ssize_t queue_dn_init_store(struct gendisk *disk, const char *page,
 	return ret;
 }
 
+static void queue_dpas_reset_debug_stats(struct request_queue *q)
+{
+	q->dpas_pas_eval = 0;
+	q->dpas_pas_to_cp = 0;
+	q->dpas_pas_to_ol = 0;
+	q->dpas_pas_stay_not_qd1 = 0;
+
+	q->dpas_ol_eval = 0;
+	q->dpas_ol_to_int = 0;
+	q->dpas_ol_to_pas = 0;
+	q->dpas_ol_stay_between = 0;
+
+	q->dpas_cp_to_pas = 0;
+	q->dpas_int_to_ol = 0;
+
+	q->dpas_last_avg_qd_x10 = -1;
+	q->dpas_min_avg_qd_x10 = -1;
+	q->dpas_max_avg_qd_x10 = -1;
+}
+
 static void queue_dpas_reset_switch_state(struct request_queue *q)
 {
 	/* switch_enabled를 다시 쓸 때는 새 측정 window를 PAS에서 시작한다. */
@@ -796,6 +816,52 @@ static void queue_dpas_reset_switch_state(struct request_queue *q)
 	q->dpas_qd = 0;
 	q->dpas_qd_sum = 0;
 	q->dpas_tf = 0;
+	queue_dpas_reset_debug_stats(q);
+}
+
+static ssize_t queue_dpas_switch_stats_show(struct gendisk *disk, char *page)
+{
+	struct request_queue *q = disk->queue;
+	unsigned long flags_lock;
+
+	u64 pas_eval, pas_to_cp, pas_to_ol, pas_stay_not_qd1;
+	u64 ol_eval, ol_to_int, ol_to_pas, ol_stay_between;
+	u64 cp_to_pas, int_to_ol;
+	s64 last_avg_qd, min_avg_qd, max_avg_qd;
+
+	spin_lock_irqsave(&q->dpas_lock, flags_lock);
+	pas_eval = q->dpas_pas_eval;
+	pas_to_cp = q->dpas_pas_to_cp;
+	pas_to_ol = q->dpas_pas_to_ol;
+	pas_stay_not_qd1 = q->dpas_pas_stay_not_qd1;
+	ol_eval = q->dpas_ol_eval;
+	ol_to_int = q->dpas_ol_to_int;
+	ol_to_pas = q->dpas_ol_to_pas;
+	ol_stay_between = q->dpas_ol_stay_between;
+	cp_to_pas = q->dpas_cp_to_pas;
+	int_to_ol = q->dpas_int_to_ol;
+	last_avg_qd = q->dpas_last_avg_qd_x10;
+	min_avg_qd = q->dpas_min_avg_qd_x10;
+	max_avg_qd = q->dpas_max_avg_qd_x10;
+	spin_unlock_irqrestore(&q->dpas_lock, flags_lock);
+
+	return sysfs_emit(page,
+		"pas_eval=%llu\n"
+		"pas_to_cp=%llu\n"
+		"pas_to_ol=%llu\n"
+		"pas_stay_not_qd1=%llu\n"
+		"ol_eval=%llu\n"
+		"ol_to_pas=%llu\n"
+		"ol_to_int=%llu\n"
+		"ol_stay_between=%llu\n"
+		"cp_to_pas=%llu\n"
+		"int_to_ol=%llu\n"
+		"last_avg_qd_x10=%lld\n"
+		"min_avg_qd_x10=%lld\n"
+		"max_avg_qd_x10=%lld\n",
+		pas_eval, pas_to_cp, pas_to_ol, pas_stay_not_qd1,
+		ol_eval, ol_to_pas, ol_to_int, ol_stay_between,
+		cp_to_pas, int_to_ol, last_avg_qd, min_avg_qd, max_avg_qd);
 }
 
 static ssize_t queue_switch_enabled_show(struct gendisk *disk, char *page)
@@ -957,6 +1023,7 @@ QUEUE_RW_ENTRY(queue_poll, "io_poll");
 QUEUE_RW_ENTRY(queue_poll_delay, "io_poll_delay");
 QUEUE_RW_ENTRY(queue_pas_enabled, "pas_enabled");
 QUEUE_RW_ENTRY(queue_pas_adaptive_enabled, "pas_adaptive_enabled");
+QUEUE_RO_ENTRY(queue_dpas_switch_stats, "dpas_switch_stats");
 QUEUE_RW_ENTRY(queue_ehp_enabled, "ehp_enabled");
 QUEUE_RW_ENTRY(queue_max_no_lock, "pas_max_no_lock");
 QUEUE_RW_ENTRY(queue_poll_threshold, "pas_poll_threshold");
@@ -1131,6 +1198,7 @@ static const struct attribute *const blk_mq_queue_attrs[] = {
 	&queue_max_no_lock_entry.attr,
 	&queue_poll_threshold_entry.attr,
 	&queue_logging_enabled_entry.attr,
+	&queue_dpas_switch_stats_entry.attr,
 	&queue_d_init_entry.attr,
 	&queue_up_init_entry.attr,
 	&queue_dn_init_entry.attr,

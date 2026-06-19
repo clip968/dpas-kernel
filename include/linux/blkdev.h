@@ -5,6 +5,7 @@
 #ifndef _LINUX_BLKDEV_H
 #define _LINUX_BLKDEV_H
 
+#include "asm-generic/int-ll64.h"
 #include <linux/types.h>
 #include <linux/blk_types.h>
 #include <linux/device.h>
@@ -531,6 +532,23 @@ struct request_queue {
 	u32			dpas_pas_cnt;
 	u32			dpas_ol_cnt;
 	u32			dpas_int_cnt;
+
+	u64			dpas_pas_eval;
+	u64			dpas_pas_to_cp;
+	u64			dpas_pas_to_ol;
+	u64			dpas_pas_stay_not_qd1;
+
+	u64			dpas_ol_eval;
+	u64			dpas_ol_to_int;
+	u64			dpas_ol_to_pas;
+	u64			dpas_ol_stay_between;
+
+	u64			dpas_cp_to_pas;
+	u64			dpas_int_to_ol;
+
+	s64			dpas_last_avg_qd_x10;
+	s64			dpas_min_avg_qd_x10;
+	s64			dpas_max_avg_qd_x10;
 
 	/* PAS/OL 전환 판단에 쓰는 poll sleep 구간의 queue depth 표본 */
 	u32			dpas_qd;
