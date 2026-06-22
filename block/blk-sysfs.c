@@ -677,6 +677,36 @@ static void queue_dpas_reinit_pas_stats(struct request_queue *q,
 	}
 }
 
+static ssize_t queue_pas_reset_stats_show(struct gendisk *disk, char *page)
+{
+	return sysfs_emit(page, "0\n");
+}
+
+static ssize_t queue_pas_reset_stats_store(struct gendisk *disk,
+					const char *page, size_t count)
+{
+	struct request_queue *q = disk->queue;
+	int err, val;
+
+	if (!queue_dpas_poll_capable(q) || !q->pas_stat)
+		return -EINVAL;
+
+	if (!q->div)
+		return -EINVAL;
+
+	err = kstrtoint(page, 10, &val);
+	if (err < 0)
+		return err;
+	if (val != 1)
+		return -EINVAL;
+
+	if (READ_ONCE(q->pas_enabled))
+		return -EBUSY;
+
+	queue_dpas_reinit_pas_stats(q, q->div);
+	return count;
+}
+
 #define QUEUE_DPAS_INT_RW(_prefix, _field, _min, _max)		\
 static ssize_t _prefix##_show(struct gendisk *disk, char *page)	\
 {									\
@@ -1024,6 +1054,7 @@ QUEUE_RW_ENTRY(queue_poll_delay, "io_poll_delay");
 QUEUE_RW_ENTRY(queue_pas_enabled, "pas_enabled");
 QUEUE_RW_ENTRY(queue_pas_adaptive_enabled, "pas_adaptive_enabled");
 QUEUE_RO_ENTRY(queue_dpas_switch_stats, "dpas_switch_stats");
+QUEUE_RW_ENTRY(queue_pas_reset_stats, "pas_reset_stats");
 QUEUE_RW_ENTRY(queue_ehp_enabled, "ehp_enabled");
 QUEUE_RW_ENTRY(queue_max_no_lock, "pas_max_no_lock");
 QUEUE_RW_ENTRY(queue_poll_threshold, "pas_poll_threshold");
@@ -1214,6 +1245,7 @@ static const struct attribute *const blk_mq_queue_attrs[] = {
 	&queue_switch_param5_entry.attr,
 	&queue_switch_param6_entry.attr,
 	&queue_switch_param7_entry.attr,
+	&queue_pas_reset_stats_entry.attr,
 
 	NULL,
 };

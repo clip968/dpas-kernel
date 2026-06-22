@@ -5,6 +5,10 @@
  * Copyright (C) 2013-2014 Jens Axboe
  * Copyright (C) 2013-2014 Christoph Hellwig
  */
+#include "asm-generic/int-ll64.h"
+#include "linux/compiler.h"
+#include "linux/limits.h"
+#include "linux/minmax.h"
 #include <linux/spinlock.h>
 #include <linux/blk-mq.h>
 #include <linux/log2.h>
@@ -5590,6 +5594,28 @@ static int blk_mq_poll_pas_bucket(const struct bio *bio)
 	return bucket;
 }
 
+#define BLK_MQ_PAS_MAX_DUR_NS 100000ULL /* 100us 상한선 */
+
+static u64 blk_mq_poll_pas_scale_duration(u64 dur, u64 adj, u64 div)
+{
+	u64 max_product;
+
+	if (unlikely(!div))
+		return min_t(u64, dur, BLK_MQ_PAS_MAX_DUR_NS);
+
+	if (!dur || !adj)
+		return 0;
+
+	if (unlikely(div > U64_MAX / BLK_MQ_PAS_MAX_DUR_NS))
+		return BLK_MQ_PAS_MAX_DUR_NS;
+
+	max_product = BLK_MQ_PAS_MAX_DUR_NS * div;
+	if (unlikely(adj > div64_u64(max_product, dur)))
+		return BLK_MQ_PAS_MAX_DUR_NS;
+
+	return div64_u64(dur * adj, div);
+}
+
 static void blk_mq_poll_pas_update_duration(struct request_queue *q,
 					    struct blk_rq_pas_stat *stat)
 {
@@ -5622,7 +5648,10 @@ static void blk_mq_poll_pas_update_duration(struct request_queue *q,
 	if (stat->adj <= 0)
 		stat->adj = q->div;
 
-	stat->dur = mul_u64_u64_div_u64(stat->dur, (u64)stat->adj, q->div);
+	// stat->dur = mul_u64_u64_div_u64(stat->dur, (u64)stat->adj, q->div);
+	stat->dur = blk_mq_poll_pas_scale_duration(stat->dur,
+			(u64)stat->adj, q->div);
+
 	if (stat->dur < q->d_init) {
 		stat->dur = q->d_init;
 		if (q->switch_enabled) {
