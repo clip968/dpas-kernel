@@ -5425,6 +5425,7 @@ static int __blk_hctx_poll(struct request_queue *q, struct blk_mq_hw_ctx *hctx,
 			   unsigned int *poll_countp)
 {
 	unsigned int poll_count = 0;
+	unsigned int max_poll_count = READ_ONCE(q->max_no_lock);
 	int ret;
 
 	do {
@@ -5443,6 +5444,10 @@ static int __blk_hctx_poll(struct request_queue *q, struct blk_mq_hw_ctx *hctx,
 			break;
 		cpu_relax();
 		poll_count++;
+
+		/* 기존에 단일 cpu에서의 livelock 문제 디버깅용 */
+		if (max_poll_count && poll_count >= max_poll_count)
+			break;
 	} while (!need_resched());
 
 	if (poll_countp)
