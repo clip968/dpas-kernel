@@ -9,6 +9,7 @@
 #include "linux/compiler.h"
 #include "linux/limits.h"
 #include "linux/minmax.h"
+#include <linux/sched.h>
 #include <linux/spinlock.h>
 #include <linux/blk-mq.h>
 #include <linux/log2.h>
@@ -4808,7 +4809,6 @@ int blk_mq_init_allocated_queue(struct blk_mq_tag_set *set,
 
 	q->poll_nsec = BLK_MQ_POLL_CLASSIC;
 
-	q->max_no_lock = 100;
 	q->poll_threshold = 0;
 	q->div = 1000000;
 	q->d_init = 100;
@@ -5425,7 +5425,8 @@ static int __blk_hctx_poll(struct request_queue *q, struct blk_mq_hw_ctx *hctx,
 			   unsigned int *poll_countp)
 {
 	unsigned int poll_count = 0;
-	unsigned int max_poll_count = READ_ONCE(q->max_no_lock);
+	long state = get_current_state();
+	bool stateful_wait = state != TASK_RUNNING;
 	int ret;
 
 	do {
@@ -5433,25 +5434,36 @@ static int __blk_hctx_poll(struct request_queue *q, struct blk_mq_hw_ctx *hctx,
 		if (ret > 0) {
 			if (poll_countp)
 				*poll_countp = poll_count;
+			if (stateful_wait)
+				__set_current_state(TASK_RUNNING);
 			return ret;
 		}
-		if (task_sigpending(current)) {
+
+		if (stateful_wait) {
+			if (signal_pending_state(state, current) ||
+			    task_is_running(current)) {
+				if (poll_countp)
+					*poll_countp = UINT_MAX;
+				__set_current_state(TASK_RUNNING);
+				return 1;
+			}
+		} else if (task_sigpending(current)) {
 			if (poll_countp)
 				*poll_countp = UINT_MAX;
 			return 1;
 		}
+
 		if (ret < 0 || (flags & BLK_POLL_ONESHOT))
 			break;
 		cpu_relax();
 		poll_count++;
-
-		/* 기존에 단일 cpu에서의 livelock 문제 디버깅용 */
-		if (max_poll_count && poll_count >= max_poll_count)
-			break;
 	} while (!need_resched());
 
 	if (poll_countp)
 		*poll_countp = poll_count;
+
+	if (stateful_wait)
+		__set_current_state(TASK_RUNNING);
 	return 0;
 }
 

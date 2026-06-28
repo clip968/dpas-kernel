@@ -559,7 +559,6 @@ struct request_queue {
 	int pas_enabled;
 	int pas_adaptive_enabled;
 	int ehp_enabled;
-	int max_no_lock;
 	int poll_threshold;
 	int logging_enabled;
 	int switch_enabled;

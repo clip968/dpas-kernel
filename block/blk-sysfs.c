@@ -928,7 +928,6 @@ static ssize_t queue_switch_enabled_store(struct gendisk *disk, const char *page
 QUEUE_DPAS_INT_RW(queue_pas_enabled, pas_enabled, 0, 1)
 QUEUE_DPAS_INT_RW(queue_pas_adaptive_enabled, pas_adaptive_enabled, 0, 2)
 QUEUE_DPAS_INT_RW(queue_ehp_enabled, ehp_enabled, 0, 1)
-QUEUE_DPAS_INT_RW(queue_max_no_lock, max_no_lock, 1, INT_MAX)
 QUEUE_DPAS_INT_RW(queue_poll_threshold, poll_threshold, 0, INT_MAX)
 QUEUE_DPAS_INT_RW(queue_logging_enabled, logging_enabled, 0, 2)
 QUEUE_DPAS_LL_RW(queue_heat_up, heat_up, 0, INT_MAX)
@@ -1056,7 +1055,6 @@ QUEUE_RW_ENTRY(queue_pas_adaptive_enabled, "pas_adaptive_enabled");
 QUEUE_RO_ENTRY(queue_dpas_switch_stats, "dpas_switch_stats");
 QUEUE_RW_ENTRY(queue_pas_reset_stats, "pas_reset_stats");
 QUEUE_RW_ENTRY(queue_ehp_enabled, "ehp_enabled");
-QUEUE_RW_ENTRY(queue_max_no_lock, "pas_max_no_lock");
 QUEUE_RW_ENTRY(queue_poll_threshold, "pas_poll_threshold");
 QUEUE_RW_ENTRY(queue_logging_enabled, "logging_enabled");
 QUEUE_RW_ENTRY(queue_d_init, "pas_d_init");
@@ -1226,7 +1224,6 @@ static const struct attribute *const blk_mq_queue_attrs[] = {
 	&queue_pas_enabled_entry.attr,
 	&queue_pas_adaptive_enabled_entry.attr,
 	&queue_ehp_enabled_entry.attr,
-	&queue_max_no_lock_entry.attr,
 	&queue_poll_threshold_entry.attr,
 	&queue_logging_enabled_entry.attr,
 	&queue_dpas_switch_stats_entry.attr,
