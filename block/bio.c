@@ -253,6 +253,12 @@ void bio_init(struct bio *bio, struct block_device *bdev, struct bio_vec *table,
 	atomic_set(&bio->__bi_cnt, 1);
 	bio->bi_cookie = BLK_QC_T_NONE;
 
+	bio->bi_pas.active = false;
+	bio->bi_pas.cpu = -1;
+	bio->bi_pas.bucket = -1;
+	bio->bi_pas.dur_cnt = 0;
+	bio->bi_pas.dur = 0;
+
 	bio->bi_max_vecs = max_vecs;
 	bio->bi_io_vec = table;
 	bio->bi_pool = NULL;

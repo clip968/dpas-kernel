@@ -203,6 +203,14 @@ typedef __u32 __bitwise blk_opf_t;
 typedef unsigned int blk_qc_t;
 #define BLK_QC_T_NONE		-1U
 
+struct bio_pas_poll_ctx {
+	bool active;
+	int cpu;
+	int bucket;
+	u8 dur_cnt;
+	u64 dur;
+};
+
 /*
  * main unit of I/O for the block layer and lower layers (ie drivers and
  * stacking drivers)
@@ -244,6 +252,9 @@ struct bio {
 	};
 	bio_end_io_t		*bi_end_io;
 	void			*bi_private;
+
+	struct bio_pas_poll_ctx bi_pas;
+
 #ifdef CONFIG_BLK_CGROUP
 	/*
 	 * Represents the association of the css and request_queue for the bio.

@@ -114,14 +114,6 @@ static void init_pas_stat(struct blk_rq_pas_stat *stat,
 	stat->update_req = 0;
 }
 
-struct blk_mq_pas_poll_ctx {
-	bool active;
-	int cpu;
-	int bucket;
-	u8 dur_cnt;
-	u64 dur;
-};
-
 /*
  * Check if any of the ctx, dispatch list or elevator
  * have pending work in this hardware queue.
@@ -5840,8 +5832,7 @@ static void blk_dpas_maybe_switch_mode(struct request_queue *q)
 }
 
 static void blk_mq_poll_pas_sleep(struct request_queue *q, struct bio *bio,
-				  unsigned int flags,
-				  struct blk_mq_pas_poll_ctx *ctx)
+				  unsigned int flags)
 {
 	struct blk_rq_pas_stat *stat;
 	u8 dur_cnt;
@@ -5898,11 +5889,11 @@ static void blk_mq_poll_pas_sleep(struct request_queue *q, struct bio *bio,
 	if (!blk_mq_poll_sleep_nsec(bio, nsecs))
 		goto out_qd;
 
-	ctx->active = true;
-	ctx->cpu = cpu;
-	ctx->bucket = bucket;
-	ctx->dur_cnt = dur_cnt;
-	ctx->dur = nsecs;
+	bio->bi_pas.active = true;
+	bio->bi_pas.cpu = cpu;
+	bio->bi_pas.bucket = bucket;
+	bio->bi_pas.dur_cnt = dur_cnt;
+	bio->bi_pas.dur = nsecs;
 
 out_qd:
 	if (q->switch_enabled) {
@@ -5913,19 +5904,30 @@ out_qd:
 	}
 }
 
-static void blk_mq_poll_pas_complete(struct request_queue *q,
-				     struct blk_mq_pas_poll_ctx *ctx,
+static void blk_mq_poll_pas_complete(struct request_queue *q, struct bio *bio,
 				     int ret, unsigned int poll_count)
 {
 	struct blk_rq_pas_stat *stat;
+	struct bio_pas_poll_ctx *ctx;
 	int cpu;
 
-	if (!ctx->active || ret <= 0 || poll_count == UINT_MAX || !q->pas_stat)
+	if (!bio || !q->pas_stat)
+		return;
+
+	ctx = &bio->bi_pas;
+	if (!ctx->active)
+		return;
+	/*
+	 * 아직 completion을 못 잡은 상태다.
+	 * 여기서 지우면 다음 bio_poll()에서 OVER/UNDER 결과가 유실된다.
+	 */
+	if (ret <= 0 || poll_count == UINT_MAX)
 		return;
 
 	cpu = get_cpu();
 	if (cpu != ctx->cpu) {
 		put_cpu();
+		ctx->active = false;
 		return;
 	}
 
@@ -5948,12 +5950,12 @@ static void blk_mq_poll_pas_complete(struct request_queue *q,
 	}
 
 	put_cpu();
+	ctx->active = false;
 }
 
 int blk_mq_poll_bio(struct request_queue *q, struct bio *bio, blk_qc_t cookie,
 		struct io_comp_batch *iob, unsigned int flags)
 {
-	struct blk_mq_pas_poll_ctx pas = {};
 	struct blk_mq_hw_ctx *hctx;
 	unsigned int poll_count = 0;
 	int ret;
@@ -5964,12 +5966,14 @@ int blk_mq_poll_bio(struct request_queue *q, struct bio *bio, blk_qc_t cookie,
 	hctx = q->queue_hw_ctx[cookie];
 
 	if (q->pas_enabled)
-		blk_mq_poll_pas_sleep(q, bio, flags, &pas);
+		blk_mq_poll_pas_sleep(q, bio, flags);
 	else
 		blk_mq_poll_lhp_sleep(q, bio, flags);
 
 	ret = __blk_hctx_poll(q, hctx, iob, flags, &poll_count);
-	blk_mq_poll_pas_complete(q, &pas, ret, poll_count);
+
+	if (q->pas_enabled)
+		blk_mq_poll_pas_complete(q, bio, ret, poll_count);
 
 	return ret;
 }
