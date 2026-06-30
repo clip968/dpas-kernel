@@ -5963,15 +5963,34 @@ int blk_mq_poll_bio(struct request_queue *q, struct bio *bio, blk_qc_t cookie,
 	if (!blk_mq_can_poll(q))
 		return 0;
 
-	hctx = q->queue_hw_ctx[cookie];
+	if (cookie == BLK_QC_T_NONE || cookie >= q->nr_hw_queues)
+		return 0;
+
+	hctx = READ_ONCE(q->queue_hw_ctx[cookie]);
+	if (!hctx)
+		return 0;
+
+	ret = __blk_hctx_poll(q, hctx, iob, flags | BLK_POLL_ONESHOT,
+				&poll_count);
+
+	if (poll_count == UINT_MAX && ret == 1)
+		ret = 0;
+
+	if (ret > 0 || ret < 0 || poll_count == UINT_MAX ||
+		(flags & BLK_POLL_ONESHOT))
+		goto out_complete;
 
 	if (q->pas_enabled)
 		blk_mq_poll_pas_sleep(q, bio, flags);
 	else
 		blk_mq_poll_lhp_sleep(q, bio, flags);
 
+	poll_count = 0;
 	ret = __blk_hctx_poll(q, hctx, iob, flags, &poll_count);
+	if (poll_count == UINT_MAX && ret == 1)
+		ret = 0;
 
+out_complete:
 	if (q->pas_enabled)
 		blk_mq_poll_pas_complete(q, bio, ret, poll_count);
 
