@@ -5560,9 +5560,6 @@ static void blk_mq_poll_lhp_sleep(struct request_queue *q, struct bio *bio,
 {
 	u64 nsecs;
 
-	if (flags & BLK_POLL_ONESHOT)
-		return;
-
 	/* classic polling, sleep 없음 */
 	if (q->poll_nsec < 0)
 		return;
@@ -5979,15 +5976,19 @@ int blk_mq_poll_bio(struct request_queue *q, struct bio *bio, blk_qc_t cookie,
 		if (poll_count == UINT_MAX && ret == 1)
 			ret = 0;
 
-		if (ret > 0 || ret < 0 || poll_count == UINT_MAX ||
-			(flags & BLK_POLL_ONESHOT))
+		if (ret > 0 || ret < 0 || poll_count == UINT_MAX)
 			goto out_complete;
 	}
-
-	if (q->pas_enabled)
-		blk_mq_poll_pas_sleep(q, bio, flags);
-	else
-		blk_mq_poll_lhp_sleep(q, bio, flags);
+	/*
+	 * caller가 BLK_POLL_ONESHOT을 줬더라도 여기까지 왔다면
+	 * pre-poll에서 completion을 못 본 것이므로 LHP/PAS delay를 수행해야 함.
+	 */
+	if (!standalone_cp) {
+		if (q->pas_enabled)
+			blk_mq_poll_pas_sleep(q, bio, flags);
+		else
+			blk_mq_poll_lhp_sleep(q, bio, flags);
+	}
 
 	poll_count = 0;
 	ret = __blk_hctx_poll(q, hctx, iob, flags, &poll_count);
